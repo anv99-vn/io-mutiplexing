@@ -1,0 +1,23 @@
+# binaries
+*.exe
+*.dll
+*.so
+*.dylib
+/server
+/server-*
+/io-multiplexing-server*
+/io-mutiplexing*
+
+# test
+*.test
+*.out
+coverage.txt
+
+# editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# claude code local settings
+.claude/
