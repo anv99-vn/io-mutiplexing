@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>I/O Multiplexing — 3 OS Flow</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html, body { height: 100%; }
+  body { background: #0b1020; color: #e5e7eb; font-family: ui-sans-serif, system-ui, -apple-system; }
+  .slide { display: none; }
+  .slide.active { display: flex; }
+  pre code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; line-height: 1.5; }
+  .grad-linux   { background: linear-gradient(135deg, #f97316 0%, #f59e0b 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .grad-darwin  { background: linear-gradient(135deg, #38bdf8 0%, #a78bfa 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .grad-windows { background: linear-gradient(135deg, #60a5fa 0%, #22d3ee 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .grad-title   { background: linear-gradient(135deg, #fb7185 0%, #f59e0b 50%, #34d399 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .step-num { width: 1.75rem; height: 1.75rem; border-radius: 9999px; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.85rem; }
+  .kbd { background:#1f2937; border:1px solid #374151; border-bottom-width:2px; padding:0.1rem 0.45rem; border-radius:0.3rem; font-family: ui-monospace, monospace; font-size:0.75rem; }
+  .arrow { font-family: monospace; color: #64748b; }
+</style>
+</head>
+<body class="overflow-hidden">
+
+<!-- progress bar -->
+<div class="fixed top-0 left-0 right-0 h-1 bg-slate-800 z-50">
+  <div id="progress" class="h-full bg-gradient-to-r from-orange-500 via-fuchsia-500 to-cyan-400 transition-all duration-300" style="width:0%"></div>
+</div>
+
+<!-- slide counter + nav hint -->
+<div class="fixed bottom-4 right-6 text-xs text-slate-500 z-50 flex gap-3 items-center">
+  <span><span class="kbd">←</span> <span class="kbd">→</span> di chuyển</span>
+  <span id="counter" class="font-mono">1 / 12</span>
+</div>
+
+<!-- nav buttons -->
+<button id="prev" class="fixed left-4 top-1/2 -translate-y-1/2 z-40 w-10 h-10 rounded-full bg-slate-800/80 hover:bg-slate-700 flex items-center justify-center text-xl">‹</button>
+<button id="next" class="fixed right-4 top-1/2 -translate-y-1/2 z-40 w-10 h-10 rounded-full bg-slate-800/80 hover:bg-slate-700 flex items-center justify-center text-xl">›</button>
+
+<main id="deck" class="h-screen w-screen">
+
+<!-- 1: Title -->
+<section class="slide active flex-col items-center justify-center h-full px-12 text-center">
+  <p class="text-sm tracking-widest text-slate-500 uppercase mb-4">Go · syscall · 3 platforms</p>
+  <h1 class="text-6xl md:text-7xl font-black grad-title mb-6">I/O Multiplexing</h1>
+  <p class="text-2xl text-slate-300 max-w-2xl">Một HTTP server tối giản, ba mô hình kernel khác nhau.</p>
+  <div class="mt-12 flex gap-8 text-lg">
+    <div><span class="grad-linux font-bold">epoll</span> <span class="text-slate-500">/ Linux</span></div>
+    <div><span class="grad-darwin font-bold">kqueue</span> <span class="text-slate-500">/ macOS</span></div>
+    <div><span class="grad-windows font-bold">IOCP</span> <span class="text-slate-500">/ Windows</span></div>
+  </div>
+  <p class="mt-16 text-xs text-slate-600">github.com/anv99-vn/io-mutiplexing</p>
+</section>
+
+<!-- 2: Overview -->
+<section class="slide flex-col h-full px-16 py-20">
+  <h2 class="text-4xl font-bold mb-10">I/O multiplexing là gì?</h2>
+  <div class="grid grid-cols-2 gap-10 flex-1">
+    <div class="space-y-6">
+      <p class="text-lg text-slate-300">Một thread theo dõi <span class="text-orange-300 font-bold">nhiều socket</span>. Kernel báo cái nào ready → code chỉ làm việc khi có sự kiện.</p>
+      <ul class="text-slate-400 space-y-2">
+        <li><span class="arrow">→</span> Không cần 1 thread per connection.</li>
+        <li><span class="arrow">→</span> Không busy-poll <code class="text-pink-300">read()</code>.</li>
+        <li><span class="arrow">→</span> Scale tốt với hàng ngàn conn.</li>
+      </ul>
+    </div>
+    <div class="bg-slate-900 rounded-2xl border border-slate-800 p-6">
+      <p class="text-sm text-slate-500 mb-3">2 mô hình lớn</p>
+      <div class="space-y-4">
+        <div>
+          <p class="font-bold text-emerald-300">Readiness</p>
+          <p class="text-sm text-slate-400">Kernel báo "đọc được", code tự gọi <code>recv()</code>. <span class="text-slate-500">(epoll, kqueue, WSAPoll, select, poll)</span></p>
+        </div>
+        <div>
+          <p class="font-bold text-cyan-300">Completion</p>
+          <p class="text-sm text-slate-400">Code post <code>recv()</code> trước, kernel báo khi đã đọc xong. <span class="text-slate-500">(IOCP, io_uring)</span></p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 3: Shared HTTP flow -->
+<section class="slide flex-col h-full px-16 py-20">
+  <h2 class="text-4xl font-bold mb-8">HTTP layer chung — <span class="text-slate-500 text-2xl font-normal">http.go</span></h2>
+  <div class="grid grid-cols-2 gap-8 flex-1">
+    <div class="space-y-4 text-slate-300">
+      <p>Cả 3 OS dùng chung 2 hàm:</p>
+      <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+        <p class="font-mono text-orange-300 mb-2">parseRequest(buf)</p>
+        <p class="text-sm text-slate-400">Tìm <code>\r\n</code>, split 3 phần → method, path.</p>
+      </div>
+      <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+        <p class="font-mono text-cyan-300 mb-2">buildResponse(method, path)</p>
+        <p class="text-sm text-slate-400">HTTP/1.1 200 OK + Content-Length + Connection: close + body.</p>
+      </div>
+    </div>
+    <div>
+      <pre class="bg-slate-950 rounded-xl p-5 border border-slate-800 text-xs overflow-auto"><code>HTTP/1.1 200 OK
+Content-Type: text/plain
+Content-Length: 59
+Connection: close
+
+Hello from io-multiplexing server
+Method: GET
+Path: /hello</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- 4: Linux epoll steps -->
+<section class="slide flex-col h-full px-16 py-16">
+  <div class="flex items-baseline gap-4 mb-6">
+    <h2 class="text-5xl font-black grad-linux">Linux · epoll</h2>
+    <span class="text-slate-500">readiness model</span>
+  </div>
+  <p class="text-slate-400 mb-8">Kernel object <code class="text-orange-300">epfd</code> giữ tập fd. <code class="text-orange-300">epoll_wait</code> trả về chỉ fd nào ready.</p>
+  <div class="grid grid-cols-3 gap-4 flex-1">
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-orange-500/20 text-orange-300 mb-3">1</span>
+      <p class="font-bold">Socket + Bind + Listen</p>
+      <p class="text-sm text-slate-400 mt-2"><code>SOCK_NONBLOCK | SOCK_CLOEXEC</code>, <code>SO_REUSEADDR</code>.</p>
+    </div>
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-orange-500/20 text-orange-300 mb-3">2</span>
+      <p class="font-bold">epoll_create1()</p>
+      <p class="text-sm text-slate-400 mt-2">Tạo kernel object → epfd.</p>
+    </div>
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-orange-500/20 text-orange-300 mb-3">3</span>
+      <p class="font-bold">epoll_ctl(ADD, listener, EPOLLIN)</p>
+      <p class="text-sm text-slate-400 mt-2">Đăng ký listener vào epfd.</p>
+    </div>
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-orange-500/20 text-orange-300 mb-3">4</span>
+      <p class="font-bold">epoll_wait()</p>
+      <p class="text-sm text-slate-400 mt-2">Block đến khi có fd ready. Kernel trả list các fd có event.</p>
+    </div>
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-orange-500/20 text-orange-300 mb-3">5</span>
+      <p class="font-bold">Nếu fd = listener</p>
+      <p class="text-sm text-slate-400 mt-2">Loop <code>accept4()</code> đến EAGAIN, mỗi client mới → <code>epoll_ctl(ADD)</code>.</p>
+    </div>
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-orange-500/20 text-orange-300 mb-3">6</span>
+      <p class="font-bold">Nếu fd = client</p>
+      <p class="text-sm text-slate-400 mt-2"><code>read</code> → parse → <code>write</code> → <code>close</code> + <code>EPOLL_CTL_DEL</code>.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 5: Linux code -->
+<section class="slide flex-col h-full px-16 py-16">
+  <h2 class="text-3xl font-bold mb-6"><span class="grad-linux">epoll</span> — vòng lặp chính <span class="text-slate-500 text-xl font-normal">server_linux.go</span></h2>
+  <pre class="bg-slate-950 rounded-xl p-6 border border-slate-800 flex-1 overflow-auto"><code><span class="text-pink-400">for</span> {
+    n, err := syscall.<span class="text-cyan-300">EpollWait</span>(epfd, events, <span class="text-orange-300">-1</span>) <span class="text-slate-500">// block vô hạn</span>
+    <span class="text-pink-400">if</span> err == syscall.EINTR { <span class="text-pink-400">continue</span> } <span class="text-slate-500">// bị signal, lặp lại</span>
+
+    <span class="text-pink-400">for</span> i := <span class="text-orange-300">0</span>; i &lt; n; i++ {
+        efd := <span class="text-cyan-300">int</span>(events[i].Fd)
+
+        <span class="text-pink-400">if</span> efd == listener {
+            <span class="text-pink-400">for</span> { <span class="text-slate-500">// vòng accept vì non-blocking</span>
+                cfd, _, err := syscall.<span class="text-cyan-300">Accept4</span>(listener, SOCK_NONBLOCK|SOCK_CLOEXEC)
+                <span class="text-pink-400">if</span> err != <span class="text-cyan-300">nil</span> { <span class="text-pink-400">break</span> } <span class="text-slate-500">// EAGAIN = hết pending</span>
+                <span class="text-cyan-300">epollAdd</span>(epfd, cfd)
+            }
+            <span class="text-pink-400">continue</span>
+        }
+        <span class="text-cyan-300">handleConnLinux</span>(efd) <span class="text-slate-500">// read → parse → write → close</span>
+        syscall.<span class="text-cyan-300">EpollCtl</span>(epfd, EPOLL_CTL_DEL, efd, <span class="text-cyan-300">nil</span>)
+    }
+}</code></pre>
+</section>
+
+<!-- 6: macOS kqueue steps -->
+<section class="slide flex-col h-full px-16 py-16">
+  <div class="flex items-baseline gap-4 mb-6">
+    <h2 class="text-5xl font-black grad-darwin">macOS · kqueue</h2>
+    <span class="text-slate-500">readiness model — họ hàng BSD</span>
+  </div>
+  <p class="text-slate-400 mb-8">Generic event interface: socket, file, signal, timer, process — gói trong "filter".</p>
+  <div class="grid grid-cols-3 gap-4 flex-1">
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-sky-500/20 text-sky-300 mb-3">1</span>
+      <p class="font-bold">Socket + Bind + Listen</p>
+      <p class="text-sm text-slate-400 mt-2">SetNonblock thủ công (không có flag trong <code>Socket()</code>).</p>
+    </div>
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-sky-500/20 text-sky-300 mb-3">2</span>
+      <p class="font-bold">Kqueue()</p>
+      <p class="text-sm text-slate-400 mt-2">Tạo kernel queue object.</p>
+    </div>
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-sky-500/20 text-sky-300 mb-3">3</span>
+      <p class="font-bold">Kevent ADD + EVFILT_READ</p>
+      <p class="text-sm text-slate-400 mt-2">Đăng ký listener. Cùng 1 syscall vừa add vừa lấy event (batch được).</p>
+    </div>
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-sky-500/20 text-sky-300 mb-3">4</span>
+      <p class="font-bold">Kevent(changes=nil) → wait</p>
+      <p class="text-sm text-slate-400 mt-2">Lấy event ready (Ident = fd).</p>
+    </div>
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-sky-500/20 text-sky-300 mb-3">5</span>
+      <p class="font-bold">Listener event</p>
+      <p class="text-sm text-slate-400 mt-2"><code>Accept</code> loop, SetNonblock client, đăng ký vào kqueue.</p>
+    </div>
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-sky-500/20 text-sky-300 mb-3">6</span>
+      <p class="font-bold">Client event</p>
+      <p class="text-sm text-slate-400 mt-2"><code>read</code> → parse → <code>write</code> → <code>close</code>. Close tự gỡ khỏi kqueue.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 7: macOS code -->
+<section class="slide flex-col h-full px-16 py-16">
+  <h2 class="text-3xl font-bold mb-6"><span class="grad-darwin">kqueue</span> — vòng lặp chính <span class="text-slate-500 text-xl font-normal">server_darwin.go</span></h2>
+  <pre class="bg-slate-950 rounded-xl p-6 border border-slate-800 flex-1 overflow-auto"><code><span class="text-pink-400">for</span> {
+    n, err := syscall.<span class="text-cyan-300">Kevent</span>(kq, <span class="text-cyan-300">nil</span>, events, <span class="text-cyan-300">nil</span>) <span class="text-slate-500">// changes=nil → chỉ wait</span>
+    <span class="text-pink-400">if</span> err == syscall.EINTR { <span class="text-pink-400">continue</span> }
+
+    <span class="text-pink-400">for</span> i := <span class="text-orange-300">0</span>; i &lt; n; i++ {
+        efd := <span class="text-cyan-300">int</span>(events[i].Ident) <span class="text-slate-500">// Ident = fd</span>
+
+        <span class="text-pink-400">if</span> efd == listener {
+            <span class="text-pink-400">for</span> {
+                cfd, _, err := syscall.<span class="text-cyan-300">Accept</span>(listener)
+                <span class="text-pink-400">if</span> err != <span class="text-cyan-300">nil</span> { <span class="text-pink-400">break</span> }
+                syscall.<span class="text-cyan-300">SetNonblock</span>(cfd, <span class="text-orange-300">true</span>)
+                <span class="text-cyan-300">kqueueAdd</span>(kq, cfd) <span class="text-slate-500">// EVFILT_READ | EV_ADD</span>
+            }
+            <span class="text-pink-400">continue</span>
+        }
+        <span class="text-cyan-300">handleConnDarwin</span>(efd) <span class="text-slate-500">// close tự gỡ khỏi kqueue</span>
+    }
+}</code></pre>
+</section>
+
+<!-- 8: Windows IOCP steps -->
+<section class="slide flex-col h-full px-16 py-16">
+  <div class="flex items-baseline gap-4 mb-6">
+    <h2 class="text-5xl font-black grad-windows">Windows · IOCP</h2>
+    <span class="text-slate-500">completion model — khác hẳn</span>
+  </div>
+  <p class="text-slate-400 mb-8">Post thao tác (Accept/Recv/Send) cùng OVERLAPPED → kernel làm xong → post completion vào port → worker pick up.</p>
+  <div class="grid grid-cols-3 gap-4 flex-1">
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-cyan-500/20 text-cyan-300 mb-3">1</span>
+      <p class="font-bold">WSAStartup</p>
+      <p class="text-sm text-slate-400 mt-2">Khởi tạo Winsock 2.2.</p>
+    </div>
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-cyan-500/20 text-cyan-300 mb-3">2</span>
+      <p class="font-bold">WSASocketW + WSA_FLAG_OVERLAPPED</p>
+      <p class="text-sm text-slate-400 mt-2">Bắt buộc cờ overlapped để dùng IOCP.</p>
+    </div>
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-cyan-500/20 text-cyan-300 mb-3">3</span>
+      <p class="font-bold">CreateIoCompletionPort</p>
+      <p class="text-sm text-slate-400 mt-2">Tạo IOCP, gắn listener vào.</p>
+    </div>
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-cyan-500/20 text-cyan-300 mb-3">4</span>
+      <p class="font-bold">Pre-post 8 × AcceptEx</p>
+      <p class="text-sm text-slate-400 mt-2">Mỗi cái: tạo socket trống + AcceptEx (overlapped).</p>
+    </div>
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-cyan-500/20 text-cyan-300 mb-3">5</span>
+      <p class="font-bold">GetQueuedCompletionStatus loop</p>
+      <p class="text-sm text-slate-400 mt-2">Kernel trả về OVERLAPPED ptr → cast ngược về <code>*ioOp</code>.</p>
+    </div>
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-cyan-500/20 text-cyan-300 mb-3">6</span>
+      <p class="font-bold">Dispatch theo opKind</p>
+      <p class="text-sm text-slate-400 mt-2">Accept → Recv → Send → close. Mỗi op pin trong map đến khi completion.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 9: Windows IOCP diagram -->
+<section class="slide flex-col h-full px-16 py-16">
+  <h2 class="text-3xl font-bold mb-8"><span class="grad-windows">IOCP</span> — completion state machine</h2>
+  <div class="flex-1 flex items-center justify-center">
+    <div class="grid grid-cols-5 gap-3 items-center text-center text-sm w-full max-w-5xl">
+      <div class="bg-slate-900 rounded-xl p-4 border border-cyan-500/30">
+        <p class="text-cyan-300 font-bold">postAccept</p>
+        <p class="text-xs text-slate-500 mt-1">AcceptEx + OVERLAPPED</p>
+      </div>
+      <p class="arrow text-2xl">→</p>
+      <div class="bg-slate-900 rounded-xl p-4 border border-slate-700">
+        <p class="text-slate-300 font-bold">kernel handles<br/>incoming TCP</p>
+        <p class="text-xs text-slate-500 mt-1">async, no thread</p>
+      </div>
+      <p class="arrow text-2xl">→</p>
+      <div class="bg-slate-900 rounded-xl p-4 border border-emerald-500/30">
+        <p class="text-emerald-300 font-bold">GQCS returns</p>
+        <p class="text-xs text-slate-500 mt-1">opKind = opAccept</p>
+      </div>
+
+      <div class="col-span-5 my-2 text-slate-600">↓ <span class="text-xs">opAccept handler: setsockopt + assoc port + postRecv + replenish accept</span></div>
+
+      <div class="bg-slate-900 rounded-xl p-4 border border-cyan-500/30">
+        <p class="text-cyan-300 font-bold">postRecv</p>
+        <p class="text-xs text-slate-500 mt-1">WSARecv + OVERLAPPED</p>
+      </div>
+      <p class="arrow text-2xl">→</p>
+      <div class="bg-slate-900 rounded-xl p-4 border border-slate-700">
+        <p class="text-slate-300 font-bold">kernel reads<br/>into buffer</p>
+        <p class="text-xs text-slate-500 mt-1">khi peer send data</p>
+      </div>
+      <p class="arrow text-2xl">→</p>
+      <div class="bg-slate-900 rounded-xl p-4 border border-emerald-500/30">
+        <p class="text-emerald-300 font-bold">GQCS returns</p>
+        <p class="text-xs text-slate-500 mt-1">nbytes = read len</p>
+      </div>
+
+      <div class="col-span-5 my-2 text-slate-600">↓ <span class="text-xs">opRecv handler: parseRequest + buildResponse + postSend</span></div>
+
+      <div class="bg-slate-900 rounded-xl p-4 border border-cyan-500/30">
+        <p class="text-cyan-300 font-bold">postSend</p>
+        <p class="text-xs text-slate-500 mt-1">WSASend + OVERLAPPED</p>
+      </div>
+      <p class="arrow text-2xl">→</p>
+      <div class="bg-slate-900 rounded-xl p-4 border border-slate-700">
+        <p class="text-slate-300 font-bold">kernel writes</p>
+        <p class="text-xs text-slate-500 mt-1">khả năng partial</p>
+      </div>
+      <p class="arrow text-2xl">→</p>
+      <div class="bg-slate-900 rounded-xl p-4 border border-rose-500/30">
+        <p class="text-rose-300 font-bold">closesocket</p>
+        <p class="text-xs text-slate-500 mt-1">khi nbytes hết</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 10: Windows code -->
+<section class="slide flex-col h-full px-16 py-16">
+  <h2 class="text-3xl font-bold mb-6"><span class="grad-windows">IOCP</span> — worker dispatch <span class="text-slate-500 text-xl font-normal">server_windows.go</span></h2>
+  <pre class="bg-slate-950 rounded-xl p-6 border border-slate-800 flex-1 overflow-auto"><code><span class="text-pink-400">for</span> {
+    <span class="text-pink-400">var</span> nbytes, key <span class="text-cyan-300">uint32</span>
+    <span class="text-pink-400">var</span> po *syscall.<span class="text-cyan-300">Overlapped</span>
+    cerr := syscall.<span class="text-cyan-300">GetQueuedCompletionStatus</span>(iocp, &amp;nbytes, &amp;key, &amp;po, INFINITE)
+    o := (*<span class="text-cyan-300">ioOp</span>)(unsafe.<span class="text-cyan-300">Pointer</span>(po)) <span class="text-slate-500">// overlapped offset 0 → cast về op</span>
+
+    <span class="text-pink-400">switch</span> o.kind {
+    <span class="text-pink-400">case</span> opAccept:
+        syscall.<span class="text-cyan-300">Setsockopt</span>(o.sock, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, ...)
+        syscall.<span class="text-cyan-300">CreateIoCompletionPort</span>(o.sock, iocp, <span class="text-orange-300">0</span>, <span class="text-orange-300">0</span>)
+        <span class="text-cyan-300">postRecv</span>(o.sock)
+        <span class="text-cyan-300">postAccept</span>(o.listener) <span class="text-slate-500">// replenish slot</span>
+
+    <span class="text-pink-400">case</span> opRecv:
+        method, path, _ := <span class="text-cyan-300">parseRequest</span>(o.buf[:nbytes])
+        <span class="text-cyan-300">postSend</span>(o.sock, <span class="text-cyan-300">buildResponse</span>(method, path))
+
+    <span class="text-pink-400">case</span> opSend:
+        o.sendOff += <span class="text-cyan-300">int</span>(nbytes)
+        <span class="text-pink-400">if</span> o.sendOff &gt;= <span class="text-cyan-300">len</span>(o.sendData) { syscall.<span class="text-cyan-300">Closesocket</span>(o.sock) }
+        <span class="text-pink-400">else</span> { syscall.<span class="text-cyan-300">WSASend</span>(o.sock, ...) } <span class="text-slate-500">// repost phần còn lại</span>
+    }
+}</code></pre>
+</section>
+
+<!-- 11: Comparison -->
+<section class="slide flex-col h-full px-16 py-16">
+  <h2 class="text-3xl font-bold mb-8">So sánh nhanh</h2>
+  <div class="overflow-auto rounded-xl border border-slate-800">
+    <table class="w-full text-sm">
+      <thead class="bg-slate-900 text-slate-400">
+        <tr>
+          <th class="text-left px-4 py-3 font-medium">Khía cạnh</th>
+          <th class="text-left px-4 py-3 font-medium grad-linux">Linux epoll</th>
+          <th class="text-left px-4 py-3 font-medium grad-darwin">macOS kqueue</th>
+          <th class="text-left px-4 py-3 font-medium grad-windows">Windows IOCP</th>
+        </tr>
+      </thead>
+      <tbody class="text-slate-300 divide-y divide-slate-800">
+        <tr><td class="px-4 py-2">Mô hình</td><td class="px-4 py-2 text-emerald-300">Readiness</td><td class="px-4 py-2 text-emerald-300">Readiness</td><td class="px-4 py-2 text-cyan-300">Completion</td></tr>
+        <tr><td class="px-4 py-2">Tạo kernel obj</td><td class="px-4 py-2">epoll_create1</td><td class="px-4 py-2">kqueue</td><td class="px-4 py-2">CreateIoCompletionPort</td></tr>
+        <tr><td class="px-4 py-2">Đăng ký</td><td class="px-4 py-2">epoll_ctl(ADD)</td><td class="px-4 py-2">kevent change</td><td class="px-4 py-2">Assoc port khi accept</td></tr>
+        <tr><td class="px-4 py-2">Wait</td><td class="px-4 py-2">epoll_wait</td><td class="px-4 py-2">kevent (no changes)</td><td class="px-4 py-2">GetQueuedCompletionStatus</td></tr>
+        <tr><td class="px-4 py-2">Accept</td><td class="px-4 py-2">accept4 loop</td><td class="px-4 py-2">accept loop</td><td class="px-4 py-2">AcceptEx pre-post</td></tr>
+        <tr><td class="px-4 py-2">Loại fd</td><td class="px-4 py-2">Mọi fd pollable</td><td class="px-4 py-2">Mọi fd + signal/timer/...</td><td class="px-4 py-2 text-yellow-300">Chỉ HANDLE overlapped</td></tr>
+        <tr><td class="px-4 py-2">Scale</td><td class="px-4 py-2">O(ready)</td><td class="px-4 py-2">O(ready)</td><td class="px-4 py-2">O(ready)</td></tr>
+        <tr><td class="px-4 py-2">Buffer cấp khi</td><td class="px-4 py-2">recv() được gọi</td><td class="px-4 py-2">recv() được gọi</td><td class="px-4 py-2 text-yellow-300">Trước khi post</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- 12: Run -->
+<section class="slide flex-col h-full px-16 py-20 items-center justify-center text-center">
+  <p class="text-sm tracking-widest text-slate-500 uppercase mb-4">Try it</p>
+  <h2 class="text-5xl font-black grad-title mb-12">Chạy thử</h2>
+  <div class="bg-slate-950 rounded-xl p-6 border border-slate-800 max-w-2xl w-full text-left">
+    <p class="text-xs text-slate-500 mb-2"># Linux / macOS / Windows — cùng 1 lệnh</p>
+    <pre class="text-emerald-300"><code>go build -o server .
+./server :8080</code></pre>
+    <p class="text-xs text-slate-500 mt-4 mb-2"># Test</p>
+    <pre class="text-cyan-300"><code>curl http://127.0.0.1:8080/hello</code></pre>
+  </div>
+  <div class="mt-12 text-slate-500 text-sm space-y-1">
+    <p>5 prebuilt binary: <a class="text-emerald-300 underline" href="https://github.com/anv99-vn/io-mutiplexing/releases/tag/v0.1.0">github.com/.../releases/v0.1.0</a></p>
+    <p>CI green: <span class="kbd">ubuntu</span> <span class="kbd">macos</span> <span class="kbd">windows</span></p>
+  </div>
+</section>
+
+</main>
+
+<script>
+  const slides = document.querySelectorAll('.slide');
+  const total = slides.length;
+  const counter = document.getElementById('counter');
+  const progress = document.getElementById('progress');
+  let cur = 0;
+
+  function show(i) {
+    cur = Math.max(0, Math.min(total - 1, i));
+    slides.forEach((s, idx) => s.classList.toggle('active', idx === cur));
+    counter.textContent = `${cur + 1} / ${total}`;
+    progress.style.width = `${((cur + 1) / total) * 100}%`;
+    window.location.hash = `#${cur + 1}`;
+  }
+
+  document.getElementById('prev').onclick = () => show(cur - 1);
+  document.getElementById('next').onclick = () => show(cur + 1);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') show(cur + 1);
+    else if (e.key === 'ArrowLeft' || e.key === 'PageUp') show(cur - 1);
+    else if (e.key === 'Home') show(0);
+    else if (e.key === 'End') show(total - 1);
+  });
+
+  const initial = parseInt(window.location.hash.slice(1), 10);
+  if (!isNaN(initial) && initial >= 1 && initial <= total) show(initial - 1);
+  else show(0);
+</script>
+
+</body>
+</html>
