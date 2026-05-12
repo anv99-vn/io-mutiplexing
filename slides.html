@@ -30,7 +30,7 @@
 <!-- slide counter + nav hint -->
 <div class="fixed bottom-4 right-6 text-xs text-slate-500 z-50 flex gap-3 items-center">
   <span><span class="kbd">←</span> <span class="kbd">→</span> di chuyển</span>
-  <span id="counter" class="font-mono">1 / 15</span>
+  <span id="counter" class="font-mono">1 / 19</span>
 </div>
 
 <!-- nav buttons -->
@@ -54,6 +54,108 @@
     <div><span class="grad-windows font-bold">IOCP</span> <span class="text-slate-500">/ Windows</span></div>
   </div>
   <p class="mt-16 text-xs text-slate-600">github.com/anv99-vn/io-mutiplexing</p>
+</section>
+
+<!-- DIAG-1: Overall architecture -->
+<section class="slide flex-col h-full px-14 py-8">
+  <h2 class="text-2xl font-bold mb-4 text-center text-slate-300">Kiến trúc tổng quan — Go process ↔ Kernel</h2>
+  <div class="flex-1 flex flex-col gap-0 min-h-0">
+
+    <!-- User Space -->
+    <div class="border-2 border-slate-600 rounded-t-2xl px-6 py-4 bg-slate-900/40" style="flex:0 0 auto">
+      <p class="text-xs text-slate-500 uppercase tracking-widest mb-3">User Space — Go HTTP Server</p>
+      <div class="grid grid-cols-4 gap-3">
+        <div class="bg-orange-500/10 border border-orange-500/40 rounded-xl p-3">
+          <p class="text-orange-300 font-bold text-sm text-center mb-2">epoll <span class="text-slate-500 font-normal text-xs">· Linux</span></p>
+          <p class="text-xs text-slate-400 font-mono leading-5">epoll_create1()<br>epoll_ctl(ADD)<br>epoll_wait()<br>read() / write()</p>
+        </div>
+        <div class="bg-amber-500/10 border border-amber-500/40 rounded-xl p-3">
+          <p class="text-amber-300 font-bold text-sm text-center mb-2">io_uring <span class="text-slate-500 font-normal text-xs">· Linux</span></p>
+          <p class="text-xs text-slate-400 font-mono leading-5">mmap(SQ/CQ)<br>write SQE<br>io_uring_enter()<br>read CQE</p>
+        </div>
+        <div class="bg-sky-500/10 border border-sky-500/40 rounded-xl p-3">
+          <p class="text-sky-300 font-bold text-sm text-center mb-2">kqueue <span class="text-slate-500 font-normal text-xs">· macOS</span></p>
+          <p class="text-xs text-slate-400 font-mono leading-5">kqueue()<br>kevent(change)<br>kevent(wait)<br>read() / write()</p>
+        </div>
+        <div class="bg-cyan-500/10 border border-cyan-500/40 rounded-xl p-3">
+          <p class="text-cyan-300 font-bold text-sm text-center mb-2">IOCP <span class="text-slate-500 font-normal text-xs">· Windows</span></p>
+          <p class="text-xs text-slate-400 font-mono leading-5">WSASocketW<br>CreateIoCP<br>AcceptEx<br>GQCS()</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Syscall boundary -->
+    <div class="flex items-center gap-2 py-1 px-4">
+      <div class="flex-1 h-px border-t-2 border-dashed border-slate-600"></div>
+      <span class="text-xs text-slate-500 shrink-0 px-2 bg-slate-950 rounded">syscall boundary</span>
+      <div class="flex-1 h-px border-t-2 border-dashed border-slate-600"></div>
+    </div>
+
+    <!-- Kernel Space -->
+    <div class="border-2 border-slate-700 rounded-b-2xl px-6 py-4 bg-slate-950/60 flex-1 flex flex-col min-h-0">
+      <p class="text-xs text-slate-500 uppercase tracking-widest mb-3">Kernel Space</p>
+      <div class="grid grid-cols-4 gap-3 flex-1">
+
+        <!-- epoll kernel -->
+        <div class="flex flex-col gap-2">
+          <div class="bg-slate-800 rounded-lg p-3 border border-orange-500/20 text-center">
+            <p class="text-orange-300 text-xs font-bold mb-1">epoll fd</p>
+            <div class="text-xs text-slate-400 space-y-1">
+              <div class="bg-slate-700/50 rounded px-2 py-0.5">interest list</div>
+              <div class="text-slate-600">↓ event</div>
+              <div class="bg-slate-700/50 rounded px-2 py-0.5">ready list</div>
+            </div>
+          </div>
+          <p class="text-center text-xs text-emerald-400">readiness</p>
+        </div>
+
+        <!-- io_uring kernel -->
+        <div class="flex flex-col gap-2">
+          <div class="bg-slate-800 rounded-lg p-3 border border-amber-500/20 text-center">
+            <p class="text-amber-300 text-xs font-bold mb-1">ring fd</p>
+            <div class="text-xs text-slate-400 space-y-1">
+              <div class="bg-slate-700/50 rounded px-2 py-0.5">SQ ring ← user</div>
+              <div class="text-slate-600">↓ kernel exec</div>
+              <div class="bg-slate-700/50 rounded px-2 py-0.5">CQ ring → user</div>
+            </div>
+          </div>
+          <p class="text-center text-xs text-cyan-400">completion</p>
+        </div>
+
+        <!-- kqueue kernel -->
+        <div class="flex flex-col gap-2">
+          <div class="bg-slate-800 rounded-lg p-3 border border-sky-500/20 text-center">
+            <p class="text-sky-300 text-xs font-bold mb-1">kqueue fd</p>
+            <div class="text-xs text-slate-400 space-y-1">
+              <div class="bg-slate-700/50 rounded px-2 py-0.5">filter list</div>
+              <div class="text-slate-600">↓ event</div>
+              <div class="bg-slate-700/50 rounded px-2 py-0.5">event queue</div>
+            </div>
+          </div>
+          <p class="text-center text-xs text-emerald-400">readiness</p>
+        </div>
+
+        <!-- IOCP kernel -->
+        <div class="flex flex-col gap-2">
+          <div class="bg-slate-800 rounded-lg p-3 border border-cyan-500/20 text-center">
+            <p class="text-cyan-300 text-xs font-bold mb-1">I/O Completion Port</p>
+            <div class="text-xs text-slate-400 space-y-1">
+              <div class="bg-slate-700/50 rounded px-2 py-0.5">OVERLAPPED queue</div>
+              <div class="text-slate-600">↓ async I/O done</div>
+              <div class="bg-slate-700/50 rounded px-2 py-0.5">completion queue</div>
+            </div>
+          </div>
+          <p class="text-center text-xs text-cyan-400">completion</p>
+        </div>
+
+      </div>
+      <!-- TCP/NIC bar -->
+      <div class="mt-3 border border-slate-700 rounded-lg py-2 px-4 text-center">
+        <p class="text-xs text-slate-500">TCP/IP stack &nbsp;→&nbsp; socket buffer &nbsp;→&nbsp; NIC driver &nbsp;→&nbsp; network</p>
+      </div>
+    </div>
+
+  </div>
 </section>
 
 <!-- 2: Overview -->
@@ -153,6 +255,89 @@ Path: /hello</code></pre>
   </div>
 </section>
 
+<!-- DIAG-2: epoll flow diagram -->
+<section class="slide flex-col h-full px-14 py-10">
+  <h2 class="text-2xl font-bold mb-6 text-center"><span class="grad-linux">epoll</span> — luồng giao tiếp User Space ↔ Kernel</h2>
+  <div class="flex-1 flex gap-0 min-h-0">
+
+    <!-- User Space column -->
+    <div class="flex-1 flex flex-col border-2 border-orange-500/30 rounded-l-2xl bg-slate-900/40 px-5 py-4 min-h-0">
+      <p class="text-xs text-orange-400 uppercase tracking-widest mb-4 font-bold">User Space — Go Process</p>
+      <div class="flex flex-col gap-3 flex-1 justify-around">
+        <div class="flex items-start gap-3">
+          <span class="step-num bg-orange-500/20 text-orange-300 shrink-0">1</span>
+          <div><p class="text-sm font-mono text-orange-200">epoll_create1(0)</p><p class="text-xs text-slate-500">tạo epoll fd</p></div>
+        </div>
+        <div class="flex items-start gap-3">
+          <span class="step-num bg-orange-500/20 text-orange-300 shrink-0">2</span>
+          <div><p class="text-sm font-mono text-orange-200">epoll_ctl(ADD, listener, EPOLLIN)</p><p class="text-xs text-slate-500">đăng ký listener</p></div>
+        </div>
+        <div class="flex items-start gap-3">
+          <span class="step-num bg-orange-500/20 text-orange-300 shrink-0">3</span>
+          <div><p class="text-sm font-mono text-orange-200">epoll_wait(epfd, events, -1)</p><p class="text-xs text-slate-500">block — nhường CPU</p></div>
+        </div>
+        <div class="flex items-start gap-3">
+          <span class="step-num bg-orange-500/20 text-orange-300 shrink-0">4</span>
+          <div><p class="text-sm font-mono text-orange-200">accept4(listener, NONBLOCK)</p><p class="text-xs text-slate-500">lấy client fd + epoll_ctl ADD</p></div>
+        </div>
+        <div class="flex items-start gap-3">
+          <span class="step-num bg-orange-500/20 text-orange-300 shrink-0">5</span>
+          <div><p class="text-sm font-mono text-orange-200">epoll_wait()</p><p class="text-xs text-slate-500">chờ client ready</p></div>
+        </div>
+        <div class="flex items-start gap-3">
+          <span class="step-num bg-orange-500/20 text-orange-300 shrink-0">6</span>
+          <div><p class="text-sm font-mono text-orange-200">read(clientFd, buf)</p><p class="text-xs text-slate-500">đọc HTTP request</p></div>
+        </div>
+        <div class="flex items-start gap-3">
+          <span class="step-num bg-orange-500/20 text-orange-300 shrink-0">7</span>
+          <div><p class="text-sm font-mono text-orange-200">write(clientFd, resp)</p><p class="text-xs text-slate-500 font-mono">close(fd) + EPOLL_CTL_DEL</p></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Arrows column -->
+    <div class="flex flex-col justify-around items-center px-3 py-4 gap-1" style="flex:0 0 90px">
+      <div class="text-center"><p class="text-orange-400 text-lg">→</p><p class="text-xs text-slate-600 mt-0.5">syscall</p></div>
+      <div class="text-center"><p class="text-orange-400 text-lg">→</p><p class="text-xs text-slate-600 mt-0.5">syscall</p></div>
+      <div class="text-center"><p class="text-orange-400 text-lg">→</p><p class="text-slate-500 text-lg leading-none">←</p><p class="text-xs text-slate-600">block/wake</p></div>
+      <div class="text-center"><p class="text-orange-400 text-lg">→</p><p class="text-slate-500 text-lg leading-none">←</p><p class="text-xs text-slate-600">fd ready</p></div>
+      <div class="text-center"><p class="text-orange-400 text-lg">→</p><p class="text-slate-500 text-lg leading-none">←</p><p class="text-xs text-slate-600">block/wake</p></div>
+      <div class="text-center"><p class="text-orange-400 text-lg">→</p><p class="text-slate-500 text-lg leading-none">←</p><p class="text-xs text-slate-600">data</p></div>
+      <div class="text-center"><p class="text-orange-400 text-lg">→</p><p class="text-xs text-slate-600 mt-0.5">data out</p></div>
+    </div>
+
+    <!-- Kernel Space column -->
+    <div class="flex-1 flex flex-col border-2 border-slate-700 rounded-r-2xl bg-slate-950/60 px-5 py-4 min-h-0">
+      <p class="text-xs text-slate-500 uppercase tracking-widest mb-4 font-bold">Kernel Space</p>
+      <div class="flex flex-col gap-3 flex-1 justify-around">
+        <div class="bg-slate-800/60 rounded-lg px-3 py-2 border border-slate-700">
+          <p class="text-xs text-slate-400">Tạo <span class="text-orange-300">epoll fd</span> — object quản lý tập fd</p>
+        </div>
+        <div class="bg-slate-800/60 rounded-lg px-3 py-2 border border-slate-700">
+          <p class="text-xs text-slate-400">Thêm listener vào <span class="text-orange-300">interest list</span> của epfd</p>
+        </div>
+        <div class="bg-slate-800/60 rounded-lg px-3 py-2 border border-emerald-800/60">
+          <p class="text-xs text-slate-400">Client connect → TCP handshake → listener <span class="text-emerald-300">ready</span><br>Kernel đánh thức epoll_wait</p>
+        </div>
+        <div class="bg-slate-800/60 rounded-lg px-3 py-2 border border-slate-700">
+          <p class="text-xs text-slate-400">Tạo client socket, thêm vào <span class="text-orange-300">interest list</span></p>
+        </div>
+        <div class="bg-slate-800/60 rounded-lg px-3 py-2 border border-emerald-800/60">
+          <p class="text-xs text-slate-400">Client gửi data → socket buffer đầy → fd <span class="text-emerald-300">ready</span><br>Kernel đánh thức epoll_wait</p>
+        </div>
+        <div class="bg-slate-800/60 rounded-lg px-3 py-2 border border-slate-700">
+          <p class="text-xs text-slate-400">Copy data từ socket buffer → user buffer</p>
+        </div>
+        <div class="bg-slate-800/60 rounded-lg px-3 py-2 border border-slate-700">
+          <p class="text-xs text-slate-400">Ghi response → gỡ fd khỏi epoll</p>
+        </div>
+      </div>
+    </div>
+
+  </div>
+  <p class="text-center text-xs text-slate-600 mt-3">Mô hình <span class="text-emerald-400">readiness</span>: kernel chỉ báo fd sẵn sàng — user code vẫn phải gọi read/write riêng.</p>
+</section>
+
 <!-- 5: Linux code -->
 <section class="slide flex-col h-full px-16 py-16">
   <h2 class="text-3xl font-bold mb-6"><span class="grad-linux">epoll</span> — vòng lặp chính <span class="text-slate-500 text-xl font-normal">server_linux.go</span></h2>
@@ -215,6 +400,80 @@ Path: /hello</code></pre>
       <p class="font-bold">Drain CQE → dispatch</p>
       <p class="text-sm text-slate-400 mt-2">Accept → submit Recv + Accept mới; Recv → Send; Send hết byte → close.</p>
     </div>
+  </div>
+</section>
+
+<!-- DIAG-3: io_uring shared ring buffer -->
+<section class="slide flex-col h-full px-14 py-8">
+  <h2 class="text-2xl font-bold mb-5 text-center"><span class="grad-linux">io_uring</span> — Shared Ring Buffer: zero-copy giữa User &amp; Kernel</h2>
+
+  <div class="flex-1 flex flex-col gap-3 min-h-0">
+
+    <!-- Top row: User write SQE + Kernel read SQE -->
+    <div class="grid grid-cols-2 gap-3" style="flex:0 0 auto">
+      <div class="bg-amber-500/10 border border-amber-500/30 rounded-xl px-5 py-3">
+        <p class="text-amber-300 font-bold text-sm mb-1">User — submit op</p>
+        <p class="text-xs text-slate-400 font-mono">sqe = getSqe()  <span class="text-slate-600">// lấy slot</span><br>sqe.Opcode = ACCEPT / RECV / SEND<br>sqe.Fd     = fd<br>sqe.Addr   = &amp;buf<br>atomic.Store(sq_tail, sq_tail+1)  <span class="text-slate-600">// publish</span></p>
+      </div>
+      <div class="bg-slate-800/60 border border-slate-700 rounded-xl px-5 py-3">
+        <p class="text-slate-300 font-bold text-sm mb-1">Kernel — process op</p>
+        <p class="text-xs text-slate-400 font-mono">sq_head = atomic.Load(sq_head)<br>sqe = sqes[sq_head &amp; mask]  <span class="text-slate-600">// đọc op</span><br>thực hiện: accept / recv / send<br>atomic.Store(sq_head, sq_head+1)</p>
+      </div>
+    </div>
+
+    <!-- Center: shared mmap -->
+    <div class="border-2 border-dashed border-amber-500/40 rounded-2xl px-6 py-4 bg-amber-500/5" style="flex:0 0 auto">
+      <p class="text-xs text-amber-400/70 uppercase tracking-widest mb-3 text-center">Shared mmap — không cần copy, không cần lock (single-threaded loop)</p>
+      <div class="grid grid-cols-3 gap-4">
+
+        <!-- SQ Ring -->
+        <div class="bg-slate-900 rounded-xl border border-orange-500/30 p-3">
+          <p class="text-orange-300 font-bold text-xs text-center mb-2">SQ Ring</p>
+          <div class="text-xs font-mono text-slate-400 space-y-1">
+            <div class="flex justify-between"><span>sq_head</span><span class="text-slate-600">← kernel đọc</span></div>
+            <div class="flex justify-between"><span>sq_tail</span><span class="text-slate-600">← user ghi</span></div>
+            <div class="flex justify-between"><span>sq_mask</span><span class="text-slate-600">= entries-1</span></div>
+            <div class="flex justify-between"><span>sq_array[]</span><span class="text-slate-600">index → SQE</span></div>
+          </div>
+        </div>
+
+        <!-- SQE Array -->
+        <div class="bg-slate-900 rounded-xl border border-amber-500/30 p-3">
+          <p class="text-amber-300 font-bold text-xs text-center mb-2">SQE Array (64B × entries)</p>
+          <div class="text-xs font-mono text-slate-400 space-y-1">
+            <div class="bg-amber-500/10 rounded px-2 py-0.5">[0] ACCEPT  fd:3</div>
+            <div class="bg-amber-500/10 rounded px-2 py-0.5">[1] RECV    fd:5 buf</div>
+            <div class="bg-amber-500/10 rounded px-2 py-0.5">[2] SEND    fd:5 resp</div>
+            <div class="text-slate-600 px-2">...</div>
+          </div>
+        </div>
+
+        <!-- CQ Ring -->
+        <div class="bg-slate-900 rounded-xl border border-emerald-500/30 p-3">
+          <p class="text-emerald-300 font-bold text-xs text-center mb-2">CQ Ring</p>
+          <div class="text-xs font-mono text-slate-400 space-y-1">
+            <div class="flex justify-between"><span>cq_head</span><span class="text-slate-600">← user đọc</span></div>
+            <div class="flex justify-between"><span>cq_tail</span><span class="text-slate-600">← kernel ghi</span></div>
+            <div class="flex justify-between"><span>cqe.UserData</span><span class="text-slate-600">= op id</span></div>
+            <div class="flex justify-between"><span>cqe.Res</span><span class="text-slate-600">= fd / len</span></div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Bottom row: syscall bridge + User read CQE -->
+    <div class="grid grid-cols-2 gap-3 flex-1">
+      <div class="bg-slate-800/60 border border-slate-600 rounded-xl px-5 py-3 flex flex-col justify-center text-center">
+        <p class="text-slate-300 font-bold text-sm mb-2">io_uring_enter(ring_fd, submit, minWait, GET_EVENTS)</p>
+        <p class="text-xs text-slate-500">1 syscall có thể submit N SQE + block cho đến khi có ≥ minWait CQE.<br>Với <code class="text-amber-400">IORING_FEAT_SQPOLL</code>: kernel poll SQ background → 0 syscall ở hot path.</p>
+      </div>
+      <div class="bg-emerald-500/10 border border-emerald-500/30 rounded-xl px-5 py-3">
+        <p class="text-emerald-300 font-bold text-sm mb-1">User — drain CQE (không cần syscall)</p>
+        <p class="text-xs text-slate-400 font-mono">head = atomic.Load(cq_head)<br>tail = atomic.Load(cq_tail)  <span class="text-slate-600">// kernel ghi</span><br><span class="text-pink-400">for</span> head != tail {<br>  c = cqes[head &amp; cqMask]<br>  dispatch(opMap[c.UserData])<br>  atomic.Store(cq_head, head+1)<br>}</p>
+      </div>
+    </div>
+
   </div>
 </section>
 
@@ -321,6 +580,89 @@ r.<span class="text-cyan-300">submitAccept</span>(listener, &amp;ioOp{kind: opAc
       <p class="text-sm text-slate-400 mt-2"><code>read</code> → parse → <code>write</code> → <code>close</code>. Close tự gỡ khỏi kqueue.</p>
     </div>
   </div>
+</section>
+
+<!-- DIAG-4: kqueue flow diagram -->
+<section class="slide flex-col h-full px-14 py-10">
+  <h2 class="text-2xl font-bold mb-6 text-center"><span class="grad-darwin">kqueue</span> — luồng giao tiếp User Space ↔ Kernel</h2>
+  <div class="flex-1 flex gap-0 min-h-0">
+
+    <!-- User Space column -->
+    <div class="flex-1 flex flex-col border-2 border-sky-500/30 rounded-l-2xl bg-slate-900/40 px-5 py-4 min-h-0">
+      <p class="text-xs text-sky-400 uppercase tracking-widest mb-4 font-bold">User Space — Go Process</p>
+      <div class="flex flex-col gap-3 flex-1 justify-around">
+        <div class="flex items-start gap-3">
+          <span class="step-num bg-sky-500/20 text-sky-300 shrink-0">1</span>
+          <div><p class="text-sm font-mono text-sky-200">kqueue()</p><p class="text-xs text-slate-500">tạo kqueue fd</p></div>
+        </div>
+        <div class="flex items-start gap-3">
+          <span class="step-num bg-sky-500/20 text-sky-300 shrink-0">2</span>
+          <div><p class="text-sm font-mono text-sky-200">kevent(kq, changes=[EVFILT_READ, ADD, listener], nil)</p><p class="text-xs text-slate-500">đăng ký listener — changes + wait trong 1 syscall</p></div>
+        </div>
+        <div class="flex items-start gap-3">
+          <span class="step-num bg-sky-500/20 text-sky-300 shrink-0">3</span>
+          <div><p class="text-sm font-mono text-sky-200">kevent(kq, nil, events)</p><p class="text-xs text-slate-500">block — chờ event (changes=nil)</p></div>
+        </div>
+        <div class="flex items-start gap-3">
+          <span class="step-num bg-sky-500/20 text-sky-300 shrink-0">4</span>
+          <div><p class="text-sm font-mono text-sky-200">accept(listener)</p><p class="text-xs text-slate-500">loop đến EAGAIN, SetNonblock(client)</p></div>
+        </div>
+        <div class="flex items-start gap-3">
+          <span class="step-num bg-sky-500/20 text-sky-300 shrink-0">5</span>
+          <div><p class="text-sm font-mono text-sky-200">kevent(kq, [EVFILT_READ, ADD, client], nil)</p><p class="text-xs text-slate-500">đăng ký client — kevent() batch được</p></div>
+        </div>
+        <div class="flex items-start gap-3">
+          <span class="step-num bg-sky-500/20 text-sky-300 shrink-0">6</span>
+          <div><p class="text-sm font-mono text-sky-200">read(client, buf)</p><p class="text-xs text-slate-500">parse HTTP → write response</p></div>
+        </div>
+        <div class="flex items-start gap-3">
+          <span class="step-num bg-sky-500/20 text-sky-300 shrink-0">7</span>
+          <div><p class="text-sm font-mono text-sky-200">close(client)</p><p class="text-xs text-slate-500">tự động gỡ khỏi kqueue (không cần kevent DEL)</p></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Arrows column -->
+    <div class="flex flex-col justify-around items-center px-3 py-4 gap-1" style="flex:0 0 90px">
+      <div class="text-center"><p class="text-sky-400 text-lg">→</p><p class="text-xs text-slate-600 mt-0.5">syscall</p></div>
+      <div class="text-center"><p class="text-sky-400 text-lg">→</p><p class="text-xs text-slate-600 mt-0.5">change</p></div>
+      <div class="text-center"><p class="text-sky-400 text-lg">→</p><p class="text-slate-500 text-lg leading-none">←</p><p class="text-xs text-slate-600">block/wake</p></div>
+      <div class="text-center"><p class="text-sky-400 text-lg">→</p><p class="text-slate-500 text-lg leading-none">←</p><p class="text-xs text-slate-600">fd ready</p></div>
+      <div class="text-center"><p class="text-sky-400 text-lg">→</p><p class="text-xs text-slate-600 mt-0.5">change</p></div>
+      <div class="text-center"><p class="text-sky-400 text-lg">→</p><p class="text-slate-500 text-lg leading-none">←</p><p class="text-xs text-slate-600">data</p></div>
+      <div class="text-center"><p class="text-sky-400 text-lg">→</p><p class="text-xs text-slate-600 mt-0.5">close</p></div>
+    </div>
+
+    <!-- Kernel Space column -->
+    <div class="flex-1 flex flex-col border-2 border-slate-700 rounded-r-2xl bg-slate-950/60 px-5 py-4 min-h-0">
+      <p class="text-xs text-slate-500 uppercase tracking-widest mb-4 font-bold">Kernel Space</p>
+      <div class="flex flex-col gap-3 flex-1 justify-around">
+        <div class="bg-slate-800/60 rounded-lg px-3 py-2 border border-slate-700">
+          <p class="text-xs text-slate-400">Tạo <span class="text-sky-300">kqueue fd</span> — generic event queue</p>
+        </div>
+        <div class="bg-slate-800/60 rounded-lg px-3 py-2 border border-slate-700">
+          <p class="text-xs text-slate-400">Gắn <span class="text-sky-300">EVFILT_READ filter</span> lên listener<br><span class="text-slate-600 text-xs">kqueue hỗ trợ: socket / file / signal / timer / proc…</span></p>
+        </div>
+        <div class="bg-slate-800/60 rounded-lg px-3 py-2 border border-emerald-800/60">
+          <p class="text-xs text-slate-400">TCP handshake hoàn tất → listener <span class="text-emerald-300">ready</span><br>Kernel push event: <code>kevent.Ident = listenerFd</code></p>
+        </div>
+        <div class="bg-slate-800/60 rounded-lg px-3 py-2 border border-slate-700">
+          <p class="text-xs text-slate-400">Cấp client fd mới từ accept queue</p>
+        </div>
+        <div class="bg-slate-800/60 rounded-lg px-3 py-2 border border-slate-700">
+          <p class="text-xs text-slate-400">Thêm EVFILT_READ filter cho client fd</p>
+        </div>
+        <div class="bg-slate-800/60 rounded-lg px-3 py-2 border border-emerald-800/60">
+          <p class="text-xs text-slate-400">Data đến socket buffer → client fd <span class="text-emerald-300">ready</span><br>Copy data → user buf khi read() được gọi</p>
+        </div>
+        <div class="bg-slate-800/60 rounded-lg px-3 py-2 border border-slate-700">
+          <p class="text-xs text-slate-400">Đóng socket → <span class="text-sky-300">filter tự gỡ</span> (EV_EOF handling)</p>
+        </div>
+      </div>
+    </div>
+
+  </div>
+  <p class="text-center text-xs text-slate-600 mt-3">Mô hình <span class="text-emerald-400">readiness</span>: giống epoll nhưng <code class="text-sky-400">kevent()</code> gộp change+wait, hỗ trợ nhiều loại event hơn.</p>
 </section>
 
 <!-- 7: macOS code -->
