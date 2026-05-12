@@ -118,8 +118,10 @@ const (
 	opSend
 )
 
-// ioOp: state cho 1 op async. UserData của SQE chứa pointer tới struct này.
+// ioOp: state cho 1 op async. UserData của SQE chứa id (uint64) tra ra ioOp qua opMap.
+// Dùng id thay vì pointer-as-UserData để tránh uintptr↔Pointer round-trip (go vet cấm).
 type ioOp struct {
+	id       uint64
 	kind     opKind
 	fd       int32 // listener cho accept; client cho recv/send
 	buf      [4096]byte
@@ -127,9 +129,22 @@ type ioOp struct {
 	sendOff  int
 }
 
-// pins: giữ tham chiếu Go tới ioOp khi kernel đang xử lý
-// (UserData chỉ là uintptr — GC không biết về nó).
-var pins = map[uintptr]*ioOp{}
+// opMap + opSeq: registry duy nhất giữ tham chiếu Go tới ioOp khi kernel đang xử lý.
+// Worker loop chạy 1 goroutine -> không cần lock.
+var (
+	opSeq uint64
+	opMap = map[uint64]*ioOp{}
+)
+
+func registerOp(o *ioOp) {
+	opSeq++
+	o.id = opSeq
+	opMap[o.id] = o
+}
+
+func unregisterOp(o *ioOp) {
+	delete(opMap, o.id)
+}
 
 type ring struct {
 	fd     int
@@ -204,20 +219,21 @@ func newRing(entries uint32) (*ring, error) {
 	r.sqesMem = sqesMem
 
 	// Trỏ các con trỏ head/tail/mask vào trong vùng mmap (qua offset kernel báo).
-	sqBase := uintptr(unsafe.Pointer(&sqMem[0]))
-	r.sqHead = (*uint32)(unsafe.Pointer(sqBase + uintptr(p.SqOff.Head)))
-	r.sqTail = (*uint32)(unsafe.Pointer(sqBase + uintptr(p.SqOff.Tail)))
-	r.sqMask = *(*uint32)(unsafe.Pointer(sqBase + uintptr(p.SqOff.RingMask)))
+	// Dùng unsafe.Add để giữ pointer hợp lệ với vet (không tạo uintptr trung gian).
+	sqBase := unsafe.Pointer(&sqMem[0])
+	r.sqHead = (*uint32)(unsafe.Add(sqBase, p.SqOff.Head))
+	r.sqTail = (*uint32)(unsafe.Add(sqBase, p.SqOff.Tail))
+	r.sqMask = *(*uint32)(unsafe.Add(sqBase, p.SqOff.RingMask))
 	r.sqArray = unsafe.Slice(
-		(*uint32)(unsafe.Pointer(sqBase+uintptr(p.SqOff.Array))),
+		(*uint32)(unsafe.Add(sqBase, p.SqOff.Array)),
 		p.SqEntries)
 
-	cqBase := uintptr(unsafe.Pointer(&r.cqRing[0]))
-	r.cqHead = (*uint32)(unsafe.Pointer(cqBase + uintptr(p.CqOff.Head)))
-	r.cqTail = (*uint32)(unsafe.Pointer(cqBase + uintptr(p.CqOff.Tail)))
-	r.cqMask = *(*uint32)(unsafe.Pointer(cqBase + uintptr(p.CqOff.RingMask)))
+	cqBase := unsafe.Pointer(&r.cqRing[0])
+	r.cqHead = (*uint32)(unsafe.Add(cqBase, p.CqOff.Head))
+	r.cqTail = (*uint32)(unsafe.Add(cqBase, p.CqOff.Tail))
+	r.cqMask = *(*uint32)(unsafe.Add(cqBase, p.CqOff.RingMask))
 	r.cqes = unsafe.Slice(
-		(*cqe)(unsafe.Pointer(cqBase+uintptr(p.CqOff.Cqes))),
+		(*cqe)(unsafe.Add(cqBase, p.CqOff.Cqes)),
 		p.CqEntries)
 
 	r.sqes = unsafe.Slice((*sqe)(unsafe.Pointer(&sqesMem[0])), p.SqEntries)
@@ -254,7 +270,7 @@ func (r *ring) submitAccept(listener int32, o *ioOp) {
 	s := r.getSqe()
 	s.Opcode = opcodeAccept
 	s.Fd = listener
-	s.UserData = uint64(uintptr(unsafe.Pointer(o)))
+	s.UserData = o.id
 	r.advanceTail()
 }
 
@@ -264,7 +280,7 @@ func (r *ring) submitRecv(client int32, o *ioOp) {
 	s.Fd = client
 	s.Addr = uint64(uintptr(unsafe.Pointer(&o.buf[0])))
 	s.Len = uint32(len(o.buf))
-	s.UserData = uint64(uintptr(unsafe.Pointer(o)))
+	s.UserData = o.id
 	r.advanceTail()
 }
 
@@ -274,7 +290,7 @@ func (r *ring) submitSend(client int32, data []byte, o *ioOp) {
 	s.Fd = client
 	s.Addr = uint64(uintptr(unsafe.Pointer(&data[0])))
 	s.Len = uint32(len(data))
-	s.UserData = uint64(uintptr(unsafe.Pointer(o)))
+	s.UserData = o.id
 	r.advanceTail()
 }
 
@@ -307,7 +323,7 @@ func Run(addr string) error {
 
 	// Bước 4: submit accept đầu tiên.
 	o := &ioOp{kind: opAccept, fd: int32(fd)}
-	pins[uintptr(unsafe.Pointer(o))] = o
+	registerOp(o)
 	r.submitAccept(int32(fd), o)
 
 	// Bước 5-6: worker loop.
@@ -327,40 +343,44 @@ func Run(addr string) error {
 				break
 			}
 			c := r.cqes[head&r.cqMask]
-			o := (*ioOp)(unsafe.Pointer(uintptr(c.UserData)))
+			o := opMap[c.UserData]
+			if o == nil {
+				atomic.StoreUint32(r.cqHead, head+1)
+				continue
+			}
 
 			switch o.kind {
 			case opAccept:
 				listener := o.fd
-				delete(pins, uintptr(unsafe.Pointer(o)))
+				unregisterOp(o)
 
 				if c.Res >= 0 {
 					client := c.Res
 					clientOp := &ioOp{kind: opRecv, fd: client}
-					pins[uintptr(unsafe.Pointer(clientOp))] = clientOp
+					registerOp(clientOp)
 					r.submitRecv(client, clientOp)
 				}
 				// Luôn submit accept mới để duy trì backlog.
 				newAccept := &ioOp{kind: opAccept, fd: listener}
-				pins[uintptr(unsafe.Pointer(newAccept))] = newAccept
+				registerOp(newAccept)
 				r.submitAccept(listener, newAccept)
 
 			case opRecv:
 				client := o.fd
 				if c.Res <= 0 {
 					syscall.Close(int(client))
-					delete(pins, uintptr(unsafe.Pointer(o)))
+					unregisterOp(o)
 					break
 				}
 				method, path, ok := parseRequest(o.buf[:c.Res])
-				delete(pins, uintptr(unsafe.Pointer(o)))
+				unregisterOp(o)
 				if !ok {
 					syscall.Close(int(client))
 					break
 				}
 				resp := buildResponse(method, path)
 				sendOp := &ioOp{kind: opSend, fd: client, sendData: resp}
-				pins[uintptr(unsafe.Pointer(sendOp))] = sendOp
+				registerOp(sendOp)
 				r.submitSend(client, resp, sendOp)
 
 			case opSend:
@@ -370,7 +390,7 @@ func Run(addr string) error {
 				}
 				if c.Res < 0 || o.sendOff >= len(o.sendData) {
 					syscall.Close(int(client))
-					delete(pins, uintptr(unsafe.Pointer(o)))
+					unregisterOp(o)
 				} else {
 					// Còn byte chưa gửi: repost cùng op với phần còn lại.
 					rest := o.sendData[o.sendOff:]
