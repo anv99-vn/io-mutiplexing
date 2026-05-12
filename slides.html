@@ -34,8 +34,12 @@
 </div>
 
 <!-- nav buttons -->
-<button id="prev" class="fixed left-4 top-1/2 -translate-y-1/2 z-40 w-10 h-10 rounded-full bg-slate-800/80 hover:bg-slate-700 flex items-center justify-center text-xl">‹</button>
-<button id="next" class="fixed right-4 top-1/2 -translate-y-1/2 z-40 w-10 h-10 rounded-full bg-slate-800/80 hover:bg-slate-700 flex items-center justify-center text-xl">›</button>
+<button id="prev" aria-label="previous" class="fixed left-4 top-1/2 -translate-y-1/2 z-40 w-10 h-10 rounded-full bg-slate-800/80 hover:bg-slate-700 flex items-center justify-center text-slate-200">
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+</button>
+<button id="next" aria-label="next" class="fixed right-4 top-1/2 -translate-y-1/2 z-40 w-10 h-10 rounded-full bg-slate-800/80 hover:bg-slate-700 flex items-center justify-center text-slate-200">
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+</button>
 
 <main id="deck" class="h-screen w-screen">
 
