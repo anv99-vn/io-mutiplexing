@@ -7,6 +7,7 @@
 /server-*
 /io-multiplexing-server*
 /io-mutiplexing*
+/io-mux-server*
 
 # test
 *.test
