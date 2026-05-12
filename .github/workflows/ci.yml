@@ -26,6 +26,22 @@ jobs:
       - name: go test
         run: go test -timeout 60s -v ./...
 
+  test-iouring:
+    name: Test Linux io_uring variant
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+      - name: go vet (iouring tag)
+        run: go vet -tags iouring ./...
+      - name: go build (iouring tag)
+        run: go build -tags iouring ./...
+      - name: go test (iouring tag)
+        run: go test -tags iouring -timeout 60s -v ./...
+
   cross-compile:
     name: Cross-compile check
     runs-on: ubuntu-latest

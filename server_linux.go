@@ -1,6 +1,7 @@
-//go:build linux
+//go:build linux && !iouring
 
-// Linux: I/O multiplexing dùng epoll.
+// Linux (default): I/O multiplexing dùng epoll.
+// Build io_uring variant: `go build -tags iouring`.
 //
 // Luồng tổng quát:
 //  1. Tạo socket TCP non-blocking + REUSEADDR.
