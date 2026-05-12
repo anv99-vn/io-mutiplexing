@@ -30,7 +30,7 @@
 <!-- slide counter + nav hint -->
 <div class="fixed bottom-4 right-6 text-xs text-slate-500 z-50 flex gap-3 items-center">
   <span><span class="kbd">←</span> <span class="kbd">→</span> di chuyển</span>
-  <span id="counter" class="font-mono">1 / 12</span>
+  <span id="counter" class="font-mono">1 / 15</span>
 </div>
 
 <!-- nav buttons -->
@@ -177,7 +177,112 @@ Path: /hello</code></pre>
 }</code></pre>
 </section>
 
-<!-- 6: macOS kqueue steps -->
+<!-- 6: Linux io_uring steps -->
+<section class="slide flex-col h-full px-16 py-16">
+  <div class="flex items-baseline gap-4 mb-6">
+    <h2 class="text-5xl font-black grad-linux">Linux · io_uring</h2>
+    <span class="text-slate-500">completion model — kernel ≥ 5.4</span>
+  </div>
+  <p class="text-slate-400 mb-8">Hai ring shared memory: <code class="text-orange-300">SQ</code> (user → kernel) và <code class="text-orange-300">CQ</code> (kernel → user). Build: <code class="text-orange-300">go build -tags iouring</code>.</p>
+  <div class="grid grid-cols-3 gap-4 flex-1">
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-orange-500/20 text-orange-300 mb-3">1</span>
+      <p class="font-bold">io_uring_setup(entries)</p>
+      <p class="text-sm text-slate-400 mt-2">Trả ring fd + offsets cho SQ/CQ trong mmap.</p>
+    </div>
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-orange-500/20 text-orange-300 mb-3">2</span>
+      <p class="font-bold">mmap SQ + CQ + SQE array</p>
+      <p class="text-sm text-slate-400 mt-2">Nếu <code>FEAT_SINGLE_MMAP</code> → SQ &amp; CQ chung 1 mmap.</p>
+    </div>
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-orange-500/20 text-orange-300 mb-3">3</span>
+      <p class="font-bold">Socket + Bind + Listen</p>
+      <p class="text-sm text-slate-400 mt-2">TCP/IPv4 thường, không cần non-blocking.</p>
+    </div>
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-orange-500/20 text-orange-300 mb-3">4</span>
+      <p class="font-bold">Submit SQE: IORING_OP_ACCEPT</p>
+      <p class="text-sm text-slate-400 mt-2">Điền SQE slot, update <code>sq_tail</code> (atomic).</p>
+    </div>
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-orange-500/20 text-orange-300 mb-3">5</span>
+      <p class="font-bold">io_uring_enter(GET_EVENTS)</p>
+      <p class="text-sm text-slate-400 mt-2">Kernel pull SQE, push CQE; block đến khi ≥ <code>minComplete</code>.</p>
+    </div>
+    <div class="bg-slate-900 rounded-xl p-5 border border-slate-800">
+      <span class="step-num bg-orange-500/20 text-orange-300 mb-3">6</span>
+      <p class="font-bold">Drain CQE → dispatch</p>
+      <p class="text-sm text-slate-400 mt-2">Accept → submit Recv + Accept mới; Recv → Send; Send hết byte → close.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 7: Linux io_uring code -->
+<section class="slide flex-col h-full px-16 py-16">
+  <h2 class="text-3xl font-bold mb-6"><span class="grad-linux">io_uring</span> — vòng lặp chính <span class="text-slate-500 text-xl font-normal">server_linux_iouring.go</span></h2>
+  <pre class="bg-slate-950 rounded-xl p-6 border border-slate-800 flex-1 overflow-auto"><code><span class="text-slate-500">// UserData = id (uint64) tra ra *ioOp qua opMap — tránh uintptr↔Pointer round-trip.</span>
+r.<span class="text-cyan-300">submitAccept</span>(listener, &amp;ioOp{kind: opAccept, fd: listener})
+
+<span class="text-pink-400">for</span> {
+    r.<span class="text-cyan-300">enter</span>(r.params.SqEntries, <span class="text-orange-300">1</span>, enterGetEvents) <span class="text-slate-500">// io_uring_enter, block tới khi ≥1 CQE</span>
+
+    <span class="text-pink-400">for</span> {
+        head := atomic.<span class="text-cyan-300">LoadUint32</span>(r.cqHead)
+        tail := atomic.<span class="text-cyan-300">LoadUint32</span>(r.cqTail)
+        <span class="text-pink-400">if</span> head == tail { <span class="text-pink-400">break</span> } <span class="text-slate-500">// drain hết CQ ring</span>
+        c := r.cqes[head&amp;r.cqMask]
+        o := opMap[c.UserData]
+
+        <span class="text-pink-400">switch</span> o.kind {
+        <span class="text-pink-400">case</span> opAccept:
+            <span class="text-pink-400">if</span> c.Res &gt;= <span class="text-orange-300">0</span> { r.<span class="text-cyan-300">submitRecv</span>(c.Res, &amp;ioOp{kind: opRecv, fd: c.Res}) }
+            r.<span class="text-cyan-300">submitAccept</span>(o.fd, &amp;ioOp{kind: opAccept, fd: o.fd}) <span class="text-slate-500">// replenish</span>
+
+        <span class="text-pink-400">case</span> opRecv:
+            method, path, _ := <span class="text-cyan-300">parseRequest</span>(o.buf[:c.Res])
+            resp := <span class="text-cyan-300">buildResponse</span>(method, path)
+            r.<span class="text-cyan-300">submitSend</span>(o.fd, resp, &amp;ioOp{kind: opSend, fd: o.fd, sendData: resp})
+
+        <span class="text-pink-400">case</span> opSend:
+            o.sendOff += <span class="text-cyan-300">int</span>(c.Res)
+            <span class="text-pink-400">if</span> o.sendOff &gt;= <span class="text-cyan-300">len</span>(o.sendData) { syscall.<span class="text-cyan-300">Close</span>(<span class="text-cyan-300">int</span>(o.fd)) }
+            <span class="text-pink-400">else</span> { r.<span class="text-cyan-300">submitSend</span>(o.fd, o.sendData[o.sendOff:], o) } <span class="text-slate-500">// repost phần còn lại</span>
+        }
+        atomic.<span class="text-cyan-300">StoreUint32</span>(r.cqHead, head+<span class="text-orange-300">1</span>)
+    }
+}</code></pre>
+</section>
+
+<!-- 8: epoll vs io_uring -->
+<section class="slide flex-col h-full px-16 py-16">
+  <h2 class="text-3xl font-bold mb-8"><span class="grad-linux">epoll</span> vs <span class="grad-linux">io_uring</span> — hai mô hình trên cùng kernel</h2>
+  <div class="grid grid-cols-2 gap-6 flex-1">
+    <div class="bg-slate-900 rounded-xl p-6 border border-orange-500/30">
+      <p class="text-orange-300 font-bold text-lg mb-3">epoll · readiness</p>
+      <ul class="text-sm text-slate-300 space-y-2 list-disc list-inside">
+        <li>Kernel báo "fd ready" → user gọi <code>read/write</code> trong syscall riêng.</li>
+        <li>Mỗi I/O = ít nhất 1 syscall (chưa kể <code>epoll_ctl</code>).</li>
+        <li>Buffer cấp khi gọi <code>read</code>.</li>
+        <li>Chỉ bao phủ thao tác pollable (socket, pipe, eventfd…).</li>
+        <li>Cần fd non-blocking + loop <code>EAGAIN</code>.</li>
+      </ul>
+    </div>
+    <div class="bg-slate-900 rounded-xl p-6 border border-amber-500/30">
+      <p class="text-amber-300 font-bold text-lg mb-3">io_uring · completion</p>
+      <ul class="text-sm text-slate-300 space-y-2 list-disc list-inside">
+        <li>User submit op (accept/recv/send/…) — kernel làm xong rồi báo qua CQE.</li>
+        <li>Batch submit + batch reap qua shared ring, 1 syscall = N op.</li>
+        <li>Buffer pin trước khi submit (Addr/Len trong SQE).</li>
+        <li>Hỗ trợ file, socket, splice, fsync, nhiều op linked.</li>
+        <li>Có <code>SQPOLL</code> để kernel poll SQ → 0 syscall ở hot path.</li>
+      </ul>
+    </div>
+  </div>
+  <p class="text-slate-500 text-sm mt-6 text-center">Giống IOCP của Windows ở chỗ "post op → đợi completion", khác ở chỗ ring nằm trong shared mmap thay vì queue ẩn trong kernel.</p>
+</section>
+
+<!-- 9: macOS kqueue steps -->
 <section class="slide flex-col h-full px-16 py-16">
   <div class="flex items-baseline gap-4 mb-6">
     <h2 class="text-5xl font-black grad-darwin">macOS · kqueue</h2>
@@ -377,19 +482,21 @@ Path: /hello</code></pre>
         <tr>
           <th class="text-left px-4 py-3 font-medium">Khía cạnh</th>
           <th class="text-left px-4 py-3 font-medium grad-linux">Linux epoll</th>
+          <th class="text-left px-4 py-3 font-medium grad-linux">Linux io_uring</th>
           <th class="text-left px-4 py-3 font-medium grad-darwin">macOS kqueue</th>
           <th class="text-left px-4 py-3 font-medium grad-windows">Windows IOCP</th>
         </tr>
       </thead>
       <tbody class="text-slate-300 divide-y divide-slate-800">
-        <tr><td class="px-4 py-2">Mô hình</td><td class="px-4 py-2 text-emerald-300">Readiness</td><td class="px-4 py-2 text-emerald-300">Readiness</td><td class="px-4 py-2 text-cyan-300">Completion</td></tr>
-        <tr><td class="px-4 py-2">Tạo kernel obj</td><td class="px-4 py-2">epoll_create1</td><td class="px-4 py-2">kqueue</td><td class="px-4 py-2">CreateIoCompletionPort</td></tr>
-        <tr><td class="px-4 py-2">Đăng ký</td><td class="px-4 py-2">epoll_ctl(ADD)</td><td class="px-4 py-2">kevent change</td><td class="px-4 py-2">Assoc port khi accept</td></tr>
-        <tr><td class="px-4 py-2">Wait</td><td class="px-4 py-2">epoll_wait</td><td class="px-4 py-2">kevent (no changes)</td><td class="px-4 py-2">GetQueuedCompletionStatus</td></tr>
-        <tr><td class="px-4 py-2">Accept</td><td class="px-4 py-2">accept4 loop</td><td class="px-4 py-2">accept loop</td><td class="px-4 py-2">AcceptEx pre-post</td></tr>
-        <tr><td class="px-4 py-2">Loại fd</td><td class="px-4 py-2">Mọi fd pollable</td><td class="px-4 py-2">Mọi fd + signal/timer/...</td><td class="px-4 py-2 text-yellow-300">Chỉ HANDLE overlapped</td></tr>
-        <tr><td class="px-4 py-2">Scale</td><td class="px-4 py-2">O(ready)</td><td class="px-4 py-2">O(ready)</td><td class="px-4 py-2">O(ready)</td></tr>
-        <tr><td class="px-4 py-2">Buffer cấp khi</td><td class="px-4 py-2">recv() được gọi</td><td class="px-4 py-2">recv() được gọi</td><td class="px-4 py-2 text-yellow-300">Trước khi post</td></tr>
+        <tr><td class="px-4 py-2">Mô hình</td><td class="px-4 py-2 text-emerald-300">Readiness</td><td class="px-4 py-2 text-cyan-300">Completion</td><td class="px-4 py-2 text-emerald-300">Readiness</td><td class="px-4 py-2 text-cyan-300">Completion</td></tr>
+        <tr><td class="px-4 py-2">Tạo kernel obj</td><td class="px-4 py-2">epoll_create1</td><td class="px-4 py-2">io_uring_setup</td><td class="px-4 py-2">kqueue</td><td class="px-4 py-2">CreateIoCompletionPort</td></tr>
+        <tr><td class="px-4 py-2">Đăng ký</td><td class="px-4 py-2">epoll_ctl(ADD)</td><td class="px-4 py-2">Submit SQE/op</td><td class="px-4 py-2">kevent change</td><td class="px-4 py-2">Assoc port khi accept</td></tr>
+        <tr><td class="px-4 py-2">Wait</td><td class="px-4 py-2">epoll_wait</td><td class="px-4 py-2">io_uring_enter</td><td class="px-4 py-2">kevent (no changes)</td><td class="px-4 py-2">GetQueuedCompletionStatus</td></tr>
+        <tr><td class="px-4 py-2">Accept</td><td class="px-4 py-2">accept4 loop</td><td class="px-4 py-2">IORING_OP_ACCEPT</td><td class="px-4 py-2">accept loop</td><td class="px-4 py-2">AcceptEx pre-post</td></tr>
+        <tr><td class="px-4 py-2">Loại fd</td><td class="px-4 py-2">Mọi fd pollable</td><td class="px-4 py-2">Socket + file + splice…</td><td class="px-4 py-2">Mọi fd + signal/timer/...</td><td class="px-4 py-2 text-yellow-300">Chỉ HANDLE overlapped</td></tr>
+        <tr><td class="px-4 py-2">Scale</td><td class="px-4 py-2">O(ready)</td><td class="px-4 py-2">O(ready) + batch ring</td><td class="px-4 py-2">O(ready)</td><td class="px-4 py-2">O(ready)</td></tr>
+        <tr><td class="px-4 py-2">Buffer cấp khi</td><td class="px-4 py-2">recv() được gọi</td><td class="px-4 py-2 text-yellow-300">Trước khi submit</td><td class="px-4 py-2">recv() được gọi</td><td class="px-4 py-2 text-yellow-300">Trước khi post</td></tr>
+        <tr><td class="px-4 py-2">Kernel yêu cầu</td><td class="px-4 py-2">≥ 2.6</td><td class="px-4 py-2">≥ 5.4</td><td class="px-4 py-2">macOS / *BSD</td><td class="px-4 py-2">NT 3.5+</td></tr>
       </tbody>
     </table>
   </div>
@@ -403,6 +510,8 @@ Path: /hello</code></pre>
     <p class="text-xs text-slate-500 mb-2"># Linux / macOS / Windows — cùng 1 lệnh</p>
     <pre class="text-emerald-300"><code>go build -o server .
 ./server :8080</code></pre>
+    <p class="text-xs text-slate-500 mt-4 mb-2"># Linux: bật io_uring variant (kernel ≥ 5.4)</p>
+    <pre class="text-amber-300"><code>go build -tags iouring -o server .</code></pre>
     <p class="text-xs text-slate-500 mt-4 mb-2"># Test</p>
     <pre class="text-cyan-300"><code>curl http://127.0.0.1:8080/hello</code></pre>
   </div>
