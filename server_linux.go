@@ -17,7 +17,13 @@ import (
 	"syscall"
 )
 
-func Run(addr string) error {
+// epollServer: implementation Server dùng epoll.
+type epollServer struct{}
+
+// NewServer: factory trả về backend epoll cho Linux (non-iouring build).
+func NewServer() Server { return &epollServer{} }
+
+func (s *epollServer) Run(addr string) error {
 	host, port, err := parseAddr(addr)
 	if err != nil {
 		return err

@@ -14,7 +14,13 @@ import (
 	"syscall"
 )
 
-func Run(addr string) error {
+// kqueueServer: implementation Server dùng kqueue cho macOS/BSD.
+type kqueueServer struct{}
+
+// NewServer: factory trả về backend kqueue.
+func NewServer() Server { return &kqueueServer{} }
+
+func (s *kqueueServer) Run(addr string) error {
 	host, port, err := parseAddr(addr)
 	if err != nil {
 		return err
