@@ -26,8 +26,17 @@ import (
 	"fmt"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 )
+
+const opcodeTimeout = 11
+
+// __kernel_timespec mirrors struct __kernel_timespec for IORING_OP_TIMEOUT.
+type __kernel_timespec struct {
+	Sec  int64
+	Nsec int64
+}
 
 const (
 	sysIoUringSetup = 425
@@ -116,6 +125,7 @@ const (
 	opAccept opKind = iota + 1
 	opRecv
 	opSend
+	opTimeout
 )
 
 // ioOp: state cho 1 op async. UserData của SQE chứa id (uint64) tra ra ioOp qua opMap.
@@ -127,6 +137,7 @@ type ioOp struct {
 	buf      [4096]byte
 	sendData []byte
 	sendOff  int
+	ts       *__kernel_timespec // giữ alive cho IORING_OP_TIMEOUT SQE
 }
 
 // opMap + opSeq: registry duy nhất giữ tham chiếu Go tới ioOp khi kernel đang xử lý.
@@ -284,6 +295,21 @@ func (r *ring) submitRecv(client int32, o *ioOp) {
 	r.advanceTail()
 }
 
+// submitTimeout posts an IORING_OP_TIMEOUT SQE that fires after duration d.
+// The __kernel_timespec is stored in o.ts to keep it alive while kernel holds the pointer.
+func (r *ring) submitTimeout(d time.Duration, o *ioOp) {
+	o.ts = &__kernel_timespec{
+		Sec:  int64(d / time.Second),
+		Nsec: int64(d % time.Second),
+	}
+	s := r.getSqe()
+	s.Opcode = opcodeTimeout
+	s.Addr = uint64(uintptr(unsafe.Pointer(o.ts)))
+	s.Len = 0 // count=0 = pure time-based timer
+	s.UserData = o.id
+	r.advanceTail()
+}
+
 func (r *ring) submitSend(client int32, data []byte, o *ioOp) {
 	s := r.getSqe()
 	s.Opcode = opcodeSend
@@ -333,6 +359,13 @@ func (s *ioUringServer) Run(addr string, h EventHandler) error {
 	registerOp(o)
 	r.submitAccept(int32(fd), o)
 
+	// deadlines: client fd -> thời điểm đóng nếu vẫn idle (chưa gửi data).
+	// Timer SQE wake up worker loop định kỳ để sweep map.
+	deadlines := make(map[int32]time.Time)
+	timerOp := &ioOp{kind: opTimeout}
+	registerOp(timerOp)
+	r.submitTimeout(sweepTick, timerOp)
+
 	// Bước 5-6: worker loop.
 	for {
 		if err := r.enter(r.params.SqEntries, 1, enterGetEvents); err != nil {
@@ -369,15 +402,33 @@ func (s *ioUringServer) Run(addr string, h EventHandler) error {
 					clientOp := &ioOp{kind: opRecv, fd: client}
 					registerOp(clientOp)
 					r.submitRecv(client, clientOp)
+					// Set deadline: client phải gửi data trong idleTimeout.
+					deadlines[client] = time.Now().Add(idleTimeout)
 				}
 				// Luôn submit accept mới để duy trì backlog.
 				newAccept := &ioOp{kind: opAccept, fd: listener}
 				registerOp(newAccept)
 				r.submitAccept(listener, newAccept)
 
+			case opTimeout:
+				// Timer fired: sweep idle client fds.
+				unregisterOp(o)
+				now := time.Now()
+				for cfd, dl := range deadlines {
+					if now.After(dl) {
+						syscall.Close(int(cfd))
+						delete(deadlines, cfd)
+					}
+				}
+				// Re-submit timer for next sweep.
+				nextTimer := &ioOp{kind: opTimeout}
+				registerOp(nextTimer)
+				r.submitTimeout(sweepTick, nextTimer)
+
 			case opRecv:
 				client := o.fd
 				conn := &Conn{fd: int(client)}
+				delete(deadlines, client) // recv arrived -> no longer idle
 				if c.Res <= 0 {
 					if s.h.Disconnect != nil {
 						s.h.Disconnect(conn)

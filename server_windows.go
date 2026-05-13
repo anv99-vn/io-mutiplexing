@@ -32,8 +32,11 @@ import (
 	"log"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 )
+
+const sweepTickMs = 1000 // GetQueuedCompletionStatus timeout, triggers periodic sweep
 
 // AcceptEx ở mswsock.dll. WSASocket ở ws2_32.dll.
 // syscall std không export WSASocket -> load lazy.
@@ -221,15 +224,32 @@ func (s *iocpServer) Run(addr string, h EventHandler) error {
 		}
 	}
 
+	// deadlines: client socket -> thời điểm đóng nếu vẫn idle (chưa gửi request).
+	// GQCS dùng sweepTickMs timeout thay vì INFINITE để sweep định kỳ.
+	deadlines := make(map[syscall.Handle]time.Time)
+	nextSweep := time.Now().Add(sweepTick)
+
 	// Bước 6: worker loop trên completion port.
 	for {
 		var nbytes uint32
 		var key uint32
 		var po *syscall.Overlapped
-		cerr := syscall.GetQueuedCompletionStatus(iocp, &nbytes, &key, &po, winInfinite)
+		cerr := syscall.GetQueuedCompletionStatus(iocp, &nbytes, &key, &po, sweepTickMs)
 		if po == nil {
-			// Port hỏng hoàn toàn -> log + tiếp tục (không có op để xử lý).
-			log.Printf("GQCS po=nil err=%v", cerr)
+			// po=nil: GQCS timeout (WAIT_TIMEOUT=258) hoặc lỗi fatal.
+			// Errno 258 = WAIT_TIMEOUT -> bình thường, chỉ cần sweep.
+			if cerr != nil && cerr != syscall.Errno(258) {
+				log.Printf("GQCS po=nil err=%v", cerr)
+			}
+			if now := time.Now(); !now.Before(nextSweep) {
+				for sock, dl := range deadlines {
+					if now.After(dl) {
+						syscall.Closesocket(sock)
+						delete(deadlines, sock)
+					}
+				}
+				nextSweep = now.Add(sweepTick)
+			}
 			continue
 		}
 		// Cast OVERLAPPED ngược về *ioOp (overlapped ở offset 0 của struct).
@@ -264,11 +284,15 @@ func (s *iocpServer) Run(addr string, h EventHandler) error {
 			// Post recv chờ request từ client.
 			if err := postRecv(client); err != nil {
 				syscall.Closesocket(client)
+			} else {
+				// Set deadline: client phải gửi data trong idleTimeout.
+				deadlines[client] = time.Now().Add(idleTimeout)
 			}
 			// Replenish 1 slot accept để duy trì backlog.
 			postAccept(lh)
 
 		case opRecv:
+			delete(deadlines, o.sock) // recv arrived -> no longer idle
 			if cerr != nil || nbytes == 0 {
 				// Lỗi hoặc peer đóng -> dọn.
 				if s.h.Disconnect != nil {

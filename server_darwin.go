@@ -12,6 +12,7 @@ package main
 
 import (
 	"syscall"
+	"time"
 )
 
 // kqueueServer: implementation Server dùng kqueue cho macOS/BSD.
@@ -62,11 +63,21 @@ func (s *kqueueServer) Run(addr string, h EventHandler) error {
 		return err
 	}
 
+	// deadlines: fd -> thời điểm bị đóng nếu vẫn idle.
+	// Sweep mỗi sweepTick xoá fd quá hạn -> chống FD leak khi client treo.
+	deadlines := make(map[int]time.Time)
+	nextSweep := time.Now().Add(sweepTick)
+
 	events := make([]syscall.Kevent_t, 64)
 	for {
-		// Bước 6: chờ event. Param 2 (changes) = nil -> chỉ lấy event,
-		// không thay đổi đăng ký lần này.
-		n, err := syscall.Kevent(kq, nil, events, nil)
+		// Bước 6: chờ event với timeout = thời gian tới sweep tiếp theo.
+		// Kqueue trả về sớm nếu có event, hoặc sau timeout để sweep deadline.
+		remaining := time.Until(nextSweep)
+		if remaining < 0 {
+			remaining = 0
+		}
+		ts := syscall.NsecToTimespec(remaining.Nanoseconds())
+		n, err := syscall.Kevent(kq, nil, events, &ts)
 		if err != nil {
 			if err == syscall.EINTR {
 				continue
@@ -88,13 +99,29 @@ func (s *kqueueServer) Run(addr string, h EventHandler) error {
 					syscall.SetNonblock(cfd, true)
 					if err := kqueueAdd(kq, cfd); err != nil {
 						syscall.Close(cfd)
+						continue
 					}
+					// Set deadline: client phải gửi data trong idleTimeout.
+					deadlines[cfd] = time.Now().Add(idleTimeout)
 				}
 				continue
 			}
 
-			// Client fd ready: đóng fd sẽ tự gỡ khỏi kqueue (không cần kevent DEL).
+			// Client fd ready: bỏ deadline, xử lý.
+			// Đóng fd tự gỡ khỏi kqueue trên darwin (không cần kevent DEL).
+			delete(deadlines, efd)
 			handleConn(efd, s.h)
+		}
+
+		// Sweep deadline: đóng fd idle quá hạn.
+		if now := time.Now(); !now.Before(nextSweep) {
+			for cfd, dl := range deadlines {
+				if now.After(dl) {
+					syscall.Close(cfd) // đóng fd tự gỡ khỏi kqueue
+					delete(deadlines, cfd)
+				}
+			}
+			nextSweep = now.Add(sweepTick)
 		}
 	}
 }

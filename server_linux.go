@@ -15,6 +15,7 @@ package main
 
 import (
 	"syscall"
+	"time"
 )
 
 // epollServer: implementation Server dùng epoll.
@@ -65,12 +66,20 @@ func (s *epollServer) Run(addr string, h EventHandler) error {
 		return err
 	}
 
+	// deadlines: fd -> thời điểm bị đóng nếu vẫn idle.
+	// Sweep mỗi sweepTick xoá fd quá hạn -> chống FD leak khi client treo.
+	deadlines := make(map[int]time.Time)
+	nextSweep := time.Now().Add(sweepTick)
+
 	// Buffer chứa tối đa 64 event mỗi lần epoll_wait trả về.
 	events := make([]syscall.EpollEvent, 64)
 	for {
-		// Bước 5: chờ event. timeout=-1 = block vô hạn tới khi có fd ready.
-		// Kernel chỉ trả những fd thực sự ready (readiness model).
-		n, err := syscall.EpollWait(epfd, events, -1)
+		// Bước 5: chờ event. Dùng timeout (ms) thay vì -1 để sweep deadline định kỳ.
+		waitMs := int(time.Until(nextSweep) / time.Millisecond)
+		if waitMs < 1 {
+			waitMs = 1
+		}
+		n, err := syscall.EpollWait(epfd, events, waitMs)
 		if err != nil {
 			// EINTR: bị signal ngắt -> lặp lại, không phải lỗi thật.
 			if err == syscall.EINTR {
@@ -95,14 +104,30 @@ func (s *epollServer) Run(addr string, h EventHandler) error {
 					// Đăng ký client fd vào epoll để chờ data.
 					if err := epollAdd(epfd, cfd); err != nil {
 						syscall.Close(cfd)
+						continue
 					}
+					// Set deadline lần đầu: client phải gửi data trong idleTimeout.
+					deadlines[cfd] = time.Now().Add(idleTimeout)
 				}
 				continue
 			}
 
-			// Gỡ client khỏi epoll trước khi xử lý — handler sẽ close fd.
+			// Gỡ client khỏi epoll + bỏ deadline trước khi xử lý — handler sẽ close fd.
 			syscall.EpollCtl(epfd, syscall.EPOLL_CTL_DEL, efd, nil)
+			delete(deadlines, efd)
 			handleConn(efd, s.h)
+		}
+
+		// Sweep deadline: đóng fd idle quá hạn.
+		if now := time.Now(); !now.Before(nextSweep) {
+			for cfd, dl := range deadlines {
+				if now.After(dl) {
+					syscall.EpollCtl(epfd, syscall.EPOLL_CTL_DEL, cfd, nil)
+					syscall.Close(cfd)
+					delete(deadlines, cfd)
+				}
+			}
+			nextSweep = now.Add(sweepTick)
 		}
 	}
 }
