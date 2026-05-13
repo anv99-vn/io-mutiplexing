@@ -36,15 +36,14 @@ func buildResponse(method, path string) []byte {
 }
 
 // newHTTPHandler returns a PacketHandler that serves basic HTTP/1.1 responses.
+// The server closes the connection after this handler returns; do not call Disconnect here.
 func newHTTPHandler() PacketHandler {
 	return func(conn *Conn, data []byte) {
 		method, path, ok := parseRequest(data)
 		if !ok {
-			conn.Disconnect()
 			return
 		}
 		conn.Send(buildResponse(method, path))
-		conn.Disconnect()
 	}
 }
 

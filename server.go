@@ -6,7 +6,7 @@ package main
 // trả về instance phù hợp cho platform hiện tại.
 type Server interface {
 	// Run khởi động server, lắng nghe trên addr (vd ":8080") và
-	// chạy event loop. Gọi h mỗi khi nhận được dữ liệu từ client.
+	// chạy event loop. Gọi h.Connect/Data/Disconnect theo vòng đời conn.
 	// Chặn cho tới khi gặp lỗi không thể phục hồi.
-	Run(addr string, h PacketHandler) error
+	Run(addr string, h EventHandler) error
 }

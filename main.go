@@ -11,7 +11,7 @@ func main() {
 		addr = os.Args[1]
 	}
 	log.Printf("io-multiplexing HTTP server listening on %s", addr)
-	err := NewEngine().OnPacket(newHTTPHandler()).Listen(addr)
+	err := NewEngine().OnData(newHTTPHandler()).Listen(addr)
 	if err != nil {
 		log.Fatal(err)
 	}

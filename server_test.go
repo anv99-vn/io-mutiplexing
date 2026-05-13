@@ -2,11 +2,9 @@ package main
 
 import (
 	"io"
-	"net"
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 )
 
 // TestServerIntegration: spawn Run() in goroutine, send HTTP request, verify response.
@@ -16,23 +14,10 @@ func TestServerIntegration(t *testing.T) {
 	const url = "http://127.0.0.1" + addr + "/integration"
 
 	go func() {
-		_ = NewEngine().OnPacket(newHTTPHandler()).Listen(addr)
+		_ = NewEngine().OnData(newHTTPHandler()).Listen(addr)
 	}()
 
-	deadline := time.Now().Add(5 * time.Second)
-	listening := false
-	for time.Now().Before(deadline) {
-		c, err := net.DialTimeout("tcp", "127.0.0.1"+addr, 200*time.Millisecond)
-		if err == nil {
-			c.Close()
-			listening = true
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if !listening {
-		t.Fatal("server never started listening")
-	}
+	waitListening(t, "127.0.0.1"+addr)
 
 	resp, err := http.Get(url)
 	if err != nil {

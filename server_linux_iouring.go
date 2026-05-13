@@ -295,12 +295,12 @@ func (r *ring) submitSend(client int32, data []byte, o *ioOp) {
 }
 
 // ioUringServer: implementation Server dùng io_uring (Linux >= 5.4).
-type ioUringServer struct{ h PacketHandler }
+type ioUringServer struct{ h EventHandler }
 
 // NewServer: factory trả về backend io_uring (build tag `iouring`).
 func NewServer() Server { return &ioUringServer{} }
 
-func (s *ioUringServer) Run(addr string, h PacketHandler) error {
+func (s *ioUringServer) Run(addr string, h EventHandler) error {
 	s.h = h
 	host, port, err := parseAddr(addr)
 	if err != nil {
@@ -363,6 +363,9 @@ func (s *ioUringServer) Run(addr string, h PacketHandler) error {
 
 				if c.Res >= 0 {
 					client := c.Res
+					if s.h.Connect != nil {
+						s.h.Connect(&Conn{fd: int(client)})
+					}
 					clientOp := &ioOp{kind: opRecv, fd: client}
 					registerOp(clientOp)
 					r.submitRecv(client, clientOp)
@@ -374,16 +377,23 @@ func (s *ioUringServer) Run(addr string, h PacketHandler) error {
 
 			case opRecv:
 				client := o.fd
+				conn := &Conn{fd: int(client)}
 				if c.Res <= 0 {
-					syscall.Close(int(client))
+					if s.h.Disconnect != nil {
+						s.h.Disconnect(conn)
+					}
 					unregisterOp(o)
+					syscall.Close(int(client))
 					break
 				}
 				data := make([]byte, c.Res)
 				copy(data, o.buf[:c.Res])
 				unregisterOp(o)
-				// handler owns send + close via Conn.
-				s.h(&Conn{fd: int(client)}, data)
+				s.h.Data(conn, data)
+				if s.h.Disconnect != nil {
+					s.h.Disconnect(conn)
+				}
+				syscall.Close(int(client)) // EBADF ignored if handler already closed
 
 			case opSend:
 				client := o.fd

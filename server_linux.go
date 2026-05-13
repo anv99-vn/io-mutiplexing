@@ -10,7 +10,7 @@
 //  4. EPOLL_CTL_ADD listener vào epfd với EPOLLIN.
 //  5. Vòng lặp epoll_wait -> kernel trả danh sách fd ready.
 //     - Nếu fd == listener: accept loop (vì non-blocking, accept đến EAGAIN).
-//     - Nếu fd == client: gỡ khỏi epoll, gọi handler, đóng.
+//     - Nếu fd == client: gỡ khỏi epoll, gọi Connect→Data→Disconnect, đóng.
 package main
 
 import (
@@ -18,12 +18,12 @@ import (
 )
 
 // epollServer: implementation Server dùng epoll.
-type epollServer struct{ h PacketHandler }
+type epollServer struct{ h EventHandler }
 
 // NewServer: factory trả về backend epoll cho Linux (non-iouring build).
 func NewServer() Server { return &epollServer{} }
 
-func (s *epollServer) Run(addr string, h PacketHandler) error {
+func (s *epollServer) Run(addr string, h EventHandler) error {
 	s.h = h
 
 	host, port, err := parseAddr(addr)
@@ -116,13 +116,26 @@ func epollAdd(epfd, fd int) error {
 	})
 }
 
-// handleConn: đọc data từ fd, gọi handler, handler chịu trách nhiệm gửi + đóng.
-func handleConn(fd int, h PacketHandler) {
+// handleConn: gọi Connect → đọc data → Data → Disconnect → đóng fd.
+// Server luôn đóng fd sau Disconnect — handler không cần gọi conn.Disconnect().
+// Nếu handler đã đóng sớm, syscall.Close trả EBADF và được bỏ qua.
+func handleConn(fd int, h EventHandler) {
+	conn := &Conn{fd: fd}
+	if h.Connect != nil {
+		h.Connect(conn)
+	}
 	buf := make([]byte, 4096)
 	n, err := syscall.Read(fd, buf)
 	if err != nil || n <= 0 {
+		if h.Disconnect != nil {
+			h.Disconnect(conn)
+		}
 		syscall.Close(fd)
 		return
 	}
-	h(&Conn{fd: fd}, buf[:n])
+	h.Data(conn, buf[:n])
+	if h.Disconnect != nil {
+		h.Disconnect(conn)
+	}
+	syscall.Close(fd) // EBADF ignored if handler already closed
 }

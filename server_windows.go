@@ -172,12 +172,12 @@ func postSend(client syscall.Handle, data []byte) error {
 }
 
 // iocpServer: implementation Server dùng IOCP của Windows.
-type iocpServer struct{ h PacketHandler }
+type iocpServer struct{ h EventHandler }
 
 // NewServer: factory trả về backend IOCP.
 func NewServer() Server { return &iocpServer{} }
 
-func (s *iocpServer) Run(addr string, h PacketHandler) error {
+func (s *iocpServer) Run(addr string, h EventHandler) error {
 	s.h = h
 	host, port, err := parseAddr(addr)
 	if err != nil {
@@ -258,6 +258,9 @@ func (s *iocpServer) Run(addr string, h PacketHandler) error {
 			}
 			client := o.sock
 			unpinOp(o)
+			if s.h.Connect != nil {
+				s.h.Connect(&Conn{sock: client})
+			}
 			// Post recv chờ request từ client.
 			if err := postRecv(client); err != nil {
 				syscall.Closesocket(client)
@@ -268,16 +271,22 @@ func (s *iocpServer) Run(addr string, h PacketHandler) error {
 		case opRecv:
 			if cerr != nil || nbytes == 0 {
 				// Lỗi hoặc peer đóng -> dọn.
-				syscall.Closesocket(o.sock)
+				if s.h.Disconnect != nil {
+					s.h.Disconnect(&Conn{sock: o.sock})
+				}
 				unpinOp(o)
+				syscall.Closesocket(o.sock)
 				continue
 			}
 			data := make([]byte, nbytes)
 			copy(data, o.buf[:nbytes])
-			client := o.sock
+			conn := &Conn{sock: o.sock}
 			unpinOp(o)
-			// handler owns send + close via Conn.
-			s.h(&Conn{sock: client}, data)
+			s.h.Data(conn, data)
+			if s.h.Disconnect != nil {
+				s.h.Disconnect(conn)
+			}
+			syscall.Closesocket(conn.sock) // WSAENOTSOCK ignored if handler already closed
 
 		case opSend:
 			if cerr != nil {
