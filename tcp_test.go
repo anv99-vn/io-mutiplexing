@@ -35,12 +35,15 @@ func TestTCPCallbackOrder(t *testing.T) {
 			Listen(":" + strings.Split(addr, ":")[1])
 	}()
 	waitListening(t, addr)
+	// waitListening probes the port with a real connection that closes immediately,
+	// triggering Connect+Disconnect. Sleep lets those events drain, then reset.
+	time.Sleep(200 * time.Millisecond)
+	mu.Lock()
+	order = order[:0]
+	mu.Unlock()
 
 	dialSend(t, addr, "ping", 4)
-
-	// Disconnect fires synchronously in handleConn after Data returns,
-	// but give the goroutine a moment to complete.
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -159,6 +162,11 @@ func TestTCPDisconnectOnEmptyRead(t *testing.T) {
 			Listen(":" + strings.Split(addr, ":")[1])
 	}()
 	waitListening(t, addr)
+	// waitListening probe also closes without sending, triggering Disconnect.
+	// Sleep lets that event drain, then reset counters before the real test.
+	time.Sleep(200 * time.Millisecond)
+	disconnects.Store(0)
+	datas.Store(0)
 
 	// Connect and immediately close without sending.
 	c, err := net.Dial("tcp", addr)
