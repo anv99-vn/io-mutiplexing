@@ -140,22 +140,6 @@ type ioOp struct {
 	ts       *__kernel_timespec // giữ alive cho IORING_OP_TIMEOUT SQE
 }
 
-// opMap + opSeq: registry duy nhất giữ tham chiếu Go tới ioOp khi kernel đang xử lý.
-// Worker loop chạy 1 goroutine -> không cần lock.
-var (
-	opSeq uint64
-	opMap = map[uint64]*ioOp{}
-)
-
-func registerOp(o *ioOp) {
-	opSeq++
-	o.id = opSeq
-	opMap[o.id] = o
-}
-
-func unregisterOp(o *ioOp) {
-	delete(opMap, o.id)
-}
 
 type ring struct {
 	fd     int
@@ -331,6 +315,19 @@ func (s *ioUringServer) Run(addr string, h EventHandler) error {
 	host, port, err := parseAddr(addr)
 	if err != nil {
 		return err
+	}
+
+	// opMap + opSeq: per-instance registry; keeps Go references alive while kernel holds
+	// the pointer. Local (not global) so concurrent server instances don't race.
+	var opSeq uint64
+	opMap := make(map[uint64]*ioOp)
+	registerOp := func(o *ioOp) {
+		opSeq++
+		o.id = opSeq
+		opMap[o.id] = o
+	}
+	unregisterOp := func(o *ioOp) {
+		delete(opMap, o.id)
 	}
 
 	// Bước 1-3: tạo listener TCP/IPv4.
