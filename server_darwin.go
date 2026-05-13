@@ -15,12 +15,12 @@ import (
 )
 
 // kqueueServer: implementation Server dùng kqueue cho macOS/BSD.
-type kqueueServer struct{ h PacketHandler }
+type kqueueServer struct{ h EventHandler }
 
 // NewServer: factory trả về backend kqueue.
 func NewServer() Server { return &kqueueServer{} }
 
-func (s *kqueueServer) Run(addr string, h PacketHandler) error {
+func (s *kqueueServer) Run(addr string, h EventHandler) error {
 	s.h = h
 
 	host, port, err := parseAddr(addr)
@@ -101,7 +101,6 @@ func (s *kqueueServer) Run(addr string, h PacketHandler) error {
 
 // kqueueAdd: thêm fd vào kqueue, chờ event "đọc được" (EVFILT_READ).
 // EV_ADD: thêm mới. EV_ENABLE: bật.
-// kevent với param changes có entry, events=nil, nevents=0 -> chỉ đăng ký.
 func kqueueAdd(kq, fd int) error {
 	ev := syscall.Kevent_t{
 		Ident:  uint64(fd),
@@ -112,13 +111,26 @@ func kqueueAdd(kq, fd int) error {
 	return err
 }
 
-// handleConn: đọc data từ fd, gọi handler, handler chịu trách nhiệm gửi + đóng.
-func handleConn(fd int, h PacketHandler) {
+// handleConn: gọi Connect → đọc data → Data → Disconnect → đóng fd.
+// Server luôn đóng fd sau Disconnect — handler không cần gọi conn.Disconnect().
+// Nếu handler đã đóng sớm, syscall.Close trả EBADF và được bỏ qua.
+func handleConn(fd int, h EventHandler) {
+	conn := &Conn{fd: fd}
+	if h.Connect != nil {
+		h.Connect(conn)
+	}
 	buf := make([]byte, 4096)
 	n, err := syscall.Read(fd, buf)
 	if err != nil || n <= 0 {
+		if h.Disconnect != nil {
+			h.Disconnect(conn)
+		}
 		syscall.Close(fd)
 		return
 	}
-	h(&Conn{fd: fd}, buf[:n])
+	h.Data(conn, buf[:n])
+	if h.Disconnect != nil {
+		h.Disconnect(conn)
+	}
+	syscall.Close(fd) // EBADF ignored if handler already closed
 }
