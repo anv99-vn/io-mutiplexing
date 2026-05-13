@@ -16,7 +16,7 @@ func TestServerIntegration(t *testing.T) {
 	const url = "http://127.0.0.1" + addr + "/integration"
 
 	go func() {
-		_ = Run(addr)
+		_ = NewServer().Run(addr)
 	}()
 
 	deadline := time.Now().Add(5 * time.Second)

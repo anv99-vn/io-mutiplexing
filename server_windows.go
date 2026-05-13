@@ -171,7 +171,13 @@ func postSend(client syscall.Handle, data []byte) error {
 	return nil
 }
 
-func Run(addr string) error {
+// iocpServer: implementation Server dùng IOCP của Windows.
+type iocpServer struct{}
+
+// NewServer: factory trả về backend IOCP.
+func NewServer() Server { return &iocpServer{} }
+
+func (s *iocpServer) Run(addr string) error {
 	host, port, err := parseAddr(addr)
 	if err != nil {
 		return err

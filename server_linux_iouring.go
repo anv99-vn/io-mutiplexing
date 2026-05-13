@@ -294,7 +294,13 @@ func (r *ring) submitSend(client int32, data []byte, o *ioOp) {
 	r.advanceTail()
 }
 
-func Run(addr string) error {
+// ioUringServer: implementation Server dùng io_uring (Linux >= 5.4).
+type ioUringServer struct{}
+
+// NewServer: factory trả về backend io_uring (build tag `iouring`).
+func NewServer() Server { return &ioUringServer{} }
+
+func (s *ioUringServer) Run(addr string) error {
 	host, port, err := parseAddr(addr)
 	if err != nil {
 		return err
