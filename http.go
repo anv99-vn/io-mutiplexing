@@ -35,6 +35,19 @@ func buildResponse(method, path string) []byte {
 	))
 }
 
+// newHTTPHandler returns a PacketHandler that serves basic HTTP/1.1 responses.
+func newHTTPHandler() PacketHandler {
+	return func(conn *Conn, data []byte) {
+		method, path, ok := parseRequest(data)
+		if !ok {
+			conn.Disconnect()
+			return
+		}
+		conn.Send(buildResponse(method, path))
+		conn.Disconnect()
+	}
+}
+
 // parseAddr: chuyển chuỗi "host:port" thành ([4]byte IP, int port).
 // Hỗ trợ: ":8080" (bind 0.0.0.0), "127.0.0.1:8080", "1.2.3.4:8080".
 // Cần [4]byte vì syscall.SockaddrInet4 yêu cầu field Addr [4]byte.

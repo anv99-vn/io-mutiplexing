@@ -10,7 +10,7 @@
 //  4. EPOLL_CTL_ADD listener vào epfd với EPOLLIN.
 //  5. Vòng lặp epoll_wait -> kernel trả danh sách fd ready.
 //     - Nếu fd == listener: accept loop (vì non-blocking, accept đến EAGAIN).
-//     - Nếu fd == client: đọc request, parse, ghi response, đóng.
+//     - Nếu fd == client: gỡ khỏi epoll, gọi handler, đóng.
 package main
 
 import (
@@ -18,12 +18,14 @@ import (
 )
 
 // epollServer: implementation Server dùng epoll.
-type epollServer struct{}
+type epollServer struct{ h PacketHandler }
 
 // NewServer: factory trả về backend epoll cho Linux (non-iouring build).
 func NewServer() Server { return &epollServer{} }
 
-func (s *epollServer) Run(addr string) error {
+func (s *epollServer) Run(addr string, h PacketHandler) error {
+	s.h = h
+
 	host, port, err := parseAddr(addr)
 	if err != nil {
 		return err
@@ -98,9 +100,9 @@ func (s *epollServer) Run(addr string) error {
 				continue
 			}
 
-			// Nếu là client fd -> xử lý request rồi gỡ khỏi epoll.
-			handleConnLinux(efd)
+			// Gỡ client khỏi epoll trước khi xử lý — handler sẽ close fd.
 			syscall.EpollCtl(epfd, syscall.EPOLL_CTL_DEL, efd, nil)
+			handleConn(efd, s.h)
 		}
 	}
 }
@@ -114,28 +116,13 @@ func epollAdd(epfd, fd int) error {
 	})
 }
 
-// handleConnLinux: đọc 1 request, ghi 1 response, đóng socket.
-// Đơn giản: giả định toàn bộ request gói trong 1 lần read 4KB (đủ cho HTTP GET ngắn).
-func handleConnLinux(fd int) {
+// handleConn: đọc data từ fd, gọi handler, handler chịu trách nhiệm gửi + đóng.
+func handleConn(fd int, h PacketHandler) {
 	buf := make([]byte, 4096)
 	n, err := syscall.Read(fd, buf)
 	if err != nil || n <= 0 {
 		syscall.Close(fd)
 		return
 	}
-	method, path, ok := parseRequest(buf[:n])
-	if !ok {
-		syscall.Close(fd)
-		return
-	}
-	resp := buildResponse(method, path)
-	// Write có thể chỉ ghi 1 phần -> vòng lặp tới khi gửi hết.
-	for off := 0; off < len(resp); {
-		w, err := syscall.Write(fd, resp[off:])
-		if err != nil || w <= 0 {
-			break
-		}
-		off += w
-	}
-	syscall.Close(fd)
+	h(&Conn{fd: fd}, buf[:n])
 }

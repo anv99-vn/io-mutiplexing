@@ -295,12 +295,13 @@ func (r *ring) submitSend(client int32, data []byte, o *ioOp) {
 }
 
 // ioUringServer: implementation Server dùng io_uring (Linux >= 5.4).
-type ioUringServer struct{}
+type ioUringServer struct{ h PacketHandler }
 
 // NewServer: factory trả về backend io_uring (build tag `iouring`).
 func NewServer() Server { return &ioUringServer{} }
 
-func (s *ioUringServer) Run(addr string) error {
+func (s *ioUringServer) Run(addr string, h PacketHandler) error {
+	s.h = h
 	host, port, err := parseAddr(addr)
 	if err != nil {
 		return err
@@ -378,16 +379,11 @@ func (s *ioUringServer) Run(addr string) error {
 					unregisterOp(o)
 					break
 				}
-				method, path, ok := parseRequest(o.buf[:c.Res])
+				data := make([]byte, c.Res)
+				copy(data, o.buf[:c.Res])
 				unregisterOp(o)
-				if !ok {
-					syscall.Close(int(client))
-					break
-				}
-				resp := buildResponse(method, path)
-				sendOp := &ioOp{kind: opSend, fd: client, sendData: resp}
-				registerOp(sendOp)
-				r.submitSend(client, resp, sendOp)
+				// handler owns send + close via Conn.
+				s.h(&Conn{fd: int(client)}, data)
 
 			case opSend:
 				client := o.fd
