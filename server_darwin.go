@@ -15,12 +15,14 @@ import (
 )
 
 // kqueueServer: implementation Server dùng kqueue cho macOS/BSD.
-type kqueueServer struct{}
+type kqueueServer struct{ h PacketHandler }
 
 // NewServer: factory trả về backend kqueue.
 func NewServer() Server { return &kqueueServer{} }
 
-func (s *kqueueServer) Run(addr string) error {
+func (s *kqueueServer) Run(addr string, h PacketHandler) error {
+	s.h = h
+
 	host, port, err := parseAddr(addr)
 	if err != nil {
 		return err
@@ -91,9 +93,8 @@ func (s *kqueueServer) Run(addr string) error {
 				continue
 			}
 
-			// Client fd ready -> đọc, parse, ghi, đóng.
-			// Đóng fd sẽ tự gỡ khỏi kqueue (không cần kevent DEL).
-			handleConnDarwin(efd)
+			// Client fd ready: đóng fd sẽ tự gỡ khỏi kqueue (không cần kevent DEL).
+			handleConn(efd, s.h)
 		}
 	}
 }
@@ -111,26 +112,13 @@ func kqueueAdd(kq, fd int) error {
 	return err
 }
 
-// handleConnDarwin: giống Linux — read, parse, write, close.
-func handleConnDarwin(fd int) {
+// handleConn: đọc data từ fd, gọi handler, handler chịu trách nhiệm gửi + đóng.
+func handleConn(fd int, h PacketHandler) {
 	buf := make([]byte, 4096)
 	n, err := syscall.Read(fd, buf)
 	if err != nil || n <= 0 {
 		syscall.Close(fd)
 		return
 	}
-	method, path, ok := parseRequest(buf[:n])
-	if !ok {
-		syscall.Close(fd)
-		return
-	}
-	resp := buildResponse(method, path)
-	for off := 0; off < len(resp); {
-		w, err := syscall.Write(fd, resp[off:])
-		if err != nil || w <= 0 {
-			break
-		}
-		off += w
-	}
-	syscall.Close(fd)
+	h(&Conn{fd: fd}, buf[:n])
 }

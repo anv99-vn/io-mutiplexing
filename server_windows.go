@@ -172,12 +172,13 @@ func postSend(client syscall.Handle, data []byte) error {
 }
 
 // iocpServer: implementation Server dùng IOCP của Windows.
-type iocpServer struct{}
+type iocpServer struct{ h PacketHandler }
 
 // NewServer: factory trả về backend IOCP.
 func NewServer() Server { return &iocpServer{} }
 
-func (s *iocpServer) Run(addr string) error {
+func (s *iocpServer) Run(addr string, h PacketHandler) error {
+	s.h = h
 	host, port, err := parseAddr(addr)
 	if err != nil {
 		return err
@@ -271,18 +272,12 @@ func (s *iocpServer) Run(addr string) error {
 				unpinOp(o)
 				continue
 			}
-			method, path, ok := parseRequest(o.buf[:nbytes])
+			data := make([]byte, nbytes)
+			copy(data, o.buf[:nbytes])
 			client := o.sock
 			unpinOp(o)
-			if !ok {
-				syscall.Closesocket(client)
-				continue
-			}
-			resp := buildResponse(method, path)
-			// Post send response (toàn bộ trong 1 op, kernel có thể chia làm nhiều completion).
-			if err := postSend(client, resp); err != nil {
-				syscall.Closesocket(client)
-			}
+			// handler owns send + close via Conn.
+			s.h(&Conn{sock: client}, data)
 
 		case opSend:
 			if cerr != nil {
