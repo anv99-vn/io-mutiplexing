@@ -2,13 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"io"
 	"net"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
 )
 
@@ -71,6 +75,48 @@ func TestHTTPServer_H2C_PriorKnowledge(t *testing.T) {
 
 	frames := readFramesUntilDataEnd(t, c, 1)
 	verifyH2Response(t, frames, "/h2c")
+}
+
+// TestHTTPServer_H2C_RealClient documents an architectural limitation by
+// attempting an h2c handshake with the standard golang.org/x/net/http2 client.
+// A real h2c client sends preface+SETTINGS, then waits for the server's
+// SETTINGS+ack before sending HEADERS. The event-loop backends used by Listen
+// are one-shot per accepted connection (a single recv -> dispatch -> close),
+// so the connection drops after the first chunk and the client cannot send
+// HEADERS. Multi-roundtrip h2c requires backends that keep the socket open
+// across recvs; for now use the h2 TLS path (which is goroutine-per-conn and
+// fully persistent) when interoperability with mainstream clients matters.
+func TestHTTPServer_H2C_RealClient(t *testing.T) {
+	t.Skip("plain TCP backends are single-recv-per-accept; real h2c clients need persistent reads. See test comment.")
+	const addr = ":17983"
+	startHTTPServer(t, addr)
+
+	tr := &http2.Transport{
+		AllowHTTP: true,
+		DialTLSContext: func(ctx context.Context, network, target string, cfg *tls.Config) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, network, target)
+		},
+	}
+	client := &http.Client{Transport: tr, Timeout: 5 * time.Second}
+	resp, err := client.Get("http://127.0.0.1" + addr + "/h2c-real")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.ProtoMajor != 2 {
+		t.Fatalf("expected HTTP/2, got %s", resp.Proto)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "/h2c-real") {
+		t.Fatalf("body missing path: %s", body)
+	}
+	if !strings.Contains(string(body), "Protocol: HTTP/2") {
+		t.Fatalf("body missing protocol marker: %s", body)
+	}
 }
 
 func TestHTTPServer_H2C_Upgrade(t *testing.T) {
