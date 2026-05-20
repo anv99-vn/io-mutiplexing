@@ -28,3 +28,8 @@ func (c *Conn) Recv(buf []byte) (int, error) {
 func (c *Conn) Disconnect() {
 	syscall.Close(c.fd)
 }
+
+// Key returns a stable identifier for this connection's underlying socket.
+// It is constant for the lifetime of the connection and survives across the
+// per-callback *Conn wrappers some backends construct.
+func (c *Conn) Key() uintptr { return uintptr(c.fd) }
